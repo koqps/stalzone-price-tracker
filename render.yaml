@@ -1,0 +1,33 @@
+# render.yaml — Render Blueprint for StalZone Price Tracker
+# This file tells Render exactly how to configure your service.
+# When you create a new service on Render, select "Blueprint" and point it
+# at your repo — it reads this file and sets everything up automatically.
+
+services:
+  - type: web
+    name: stalzone-tracker
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python combined.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: REGION
+        value: na
+      - key: LIVE_MARKET_DATA
+        value: "true"
+      - key: AUCTION_LOT_LIMIT
+        value: "100"
+      - key: MIN_ALERT_CONFIDENCE
+        value: "65"
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: EXBO_CLIENT_ID
+        sync: false
+      - key: EXBO_CLIENT_SECRET
+        sync: false
+      - key: CHANNEL_ID
+        sync: false
