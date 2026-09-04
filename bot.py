@@ -164,7 +164,7 @@ def init_db():
     """Initialize the MarketDB."""
     global market_db
     market_db = MarketDB()
-    log.info("MarketDB initialised at %s", market_db.db_path)
+    log.info("MarketDB initialised at %s", market_db.path)
     return market_db
 
 
