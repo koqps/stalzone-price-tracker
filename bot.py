@@ -411,21 +411,24 @@ async def community_collection_loop():
     """Daily community signal collection — runs every 24 hours."""
     try:
         log.info("=== Starting community signal collection ===")
-        signals = community_sources.collect_all_community_signals(
-            item_list=list(tracked_items.values())[:20],  # cap at 20 items
-            region=REGION,
+        signals = await asyncio.to_thread(
+            community_sources.collect_all_community_signals,
+            item_filter=set(list(tracked_items.values())[:20]),  # cap at 20 items
         )
         if market_db and signals:
             for s in signals:
                 market_db.record_community_signal(
                     item_name=s.get("item_name", ""),
-                    source=s.get("source", "unknown"),
-                    signal_type=s.get("signal_type", "price_claim"),
-                    claimed_value=s.get("claimed_value"),
-                    text=s.get("text", ""),
-                    url=s.get("url", ""),
+                    region=s.get("region", REGION),
+                    claimed_price=s.get("claimed_price"),
                     sentiment=s.get("sentiment", "neutral"),
-                    region=REGION,
+                    sentiment_score=s.get("sentiment_score", 0),
+                    source=s.get("source", "unknown"),
+                    source_name=s.get("source_name", ""),
+                    url=s.get("url", ""),
+                    excerpt=s.get("excerpt", ""),
+                    confidence=s.get("confidence", 0.15),
+                    collected_at=s.get("collected_at", time.time()),
                 )
             log.info("Community collection complete: %d signals", len(signals))
         else:
