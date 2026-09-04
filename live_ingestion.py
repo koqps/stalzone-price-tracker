@@ -16,6 +16,7 @@ Requires EXBO_CLIENT_ID and EXBO_CLIENT_SECRET environment variables
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 import logging
@@ -82,13 +83,13 @@ def get_db_lookup():
 
 # ─── Tradeable artifact discovery ────────────────────────────────────────────
 
-def load_tradeable_artifacts() -> dict[str, str]:
+async def load_tradeable_artifacts() -> dict[str, str]:
     """Load all tradeable artifacts from the stalcraft-database.
 
     Returns a dict mapping item_id -> item_name.
     """
     lookup = get_db_lookup()
-    all_items = lookup.get_all(realm=REALM)
+    all_items = await lookup.get_all(realm=REALM)
     artifacts: dict[str, str] = {}
 
     for item_id, data in all_items.items():
@@ -323,7 +324,7 @@ def ingest_live_data(
 
     if tracked_items is None:
         try:
-            tracked_items = load_tradeable_artifacts()
+            tracked_items = asyncio.run(load_tradeable_artifacts())
         except Exception as e:
             log.error("Failed to load tradeable artifacts: %s", e)
             tracked_items = {}

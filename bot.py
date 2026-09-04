@@ -149,7 +149,7 @@ async def init_api():
 
     # Load tradeable artifacts from the stalcraft-database
     try:
-        tracked_items = load_tradeable_artifacts()
+        tracked_items = await load_tradeable_artifacts()
         log.info("Loaded %d tradeable artifacts", len(tracked_items))
     except Exception as e:
         log.error("Failed to load tradeable artifacts: %s", e)
@@ -393,7 +393,8 @@ async def history_ingest_loop():
     """Periodic price history ingestion — runs every 6 hours."""
     try:
         log.info("=== Starting price history ingestion ===")
-        result = ingest_live_data(
+        result = await asyncio.to_thread(
+            ingest_live_data,
             db=market_db,
             tracked_items=tracked_items,
             region=REGION,
@@ -650,7 +651,7 @@ async def cmd_reload(interaction: discord.Interaction):
     await interaction.response.send_message("🔄 Reloading artifacts...")
     try:
         global tracked_items
-        tracked_items = load_tradeable_artifacts()
+        tracked_items = await load_tradeable_artifacts()
         await interaction.followup.send(f"✅ Reloaded {len(tracked_items)} artifacts.")
     except Exception as e:
         await interaction.followup.send(f"❌ Failed to reload: {e}")
