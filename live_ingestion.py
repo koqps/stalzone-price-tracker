@@ -76,7 +76,14 @@ def get_db_lookup():
     if _db_lookup is not None:
         return _db_lookup
     from scapi import DatabaseLookup
-    _db_lookup = DatabaseLookup()
+    from scapi.database.github import GitHubClient
+    _db_lookup = DatabaseLookup(
+        github=GitHubClient(
+            owner="EXBO-Studio",
+            repository="stalzone-database",
+            branch="main",
+        )
+    )
     log.info("scapi DatabaseLookup initialised (realm=%s)", REALM)
     return _db_lookup
 
@@ -134,9 +141,9 @@ def extract_quality(additional: dict | None) -> tuple[int | None, float | None]:
 
     The scapi additional dict structure for auction lots:
       {
-        "qlt": 3,              # quality tier 0-5
-        "upgrade_bonus": 0.08, # bonus fraction
-        "upgrade_level": 2,    # upgrade level
+        "qlt": 3,
+        "upgrade_bonus": 0.08,
+        "upgrade_level": 2,
         "bound": false,
         ...
       }
@@ -146,7 +153,6 @@ def extract_quality(additional: dict | None) -> tuple[int | None, float | None]:
 
     qlt = additional.get("qlt")
     if qlt is None:
-        # Some lots use "quality" instead of "qlt"
         qlt = additional.get("quality")
 
     if qlt is not None:
@@ -158,10 +164,8 @@ def extract_quality(additional: dict | None) -> tuple[int | None, float | None]:
         except (ValueError, TypeError):
             qlt = None
 
-    # Upgrade bonus can be a float or a dict
     upgrade_bonus = additional.get("upgrade_bonus")
     if isinstance(upgrade_bonus, dict):
-        # Some formats: {"value": 0.08, ...}
         upgrade_bonus = upgrade_bonus.get("value", upgrade_bonus.get("amount"))
     if upgrade_bonus is not None:
         try:
@@ -205,9 +209,6 @@ async def ingest_item_lots(
     recorded = 0
     for lot in lots:
         qlt, upgrade_bonus = extract_quality(getattr(lot, "additional", None))
-
-        # Skip lots where quality can't be determined — this prevents
-        # the old bug where unknown-quality lots were silently treated as Common.
         if qlt is None:
             continue
 
@@ -217,9 +218,6 @@ async def ingest_item_lots(
             continue
 
         unit_price = buyout_price / max(amount, 1)
-
-        # Generate a unique lot key using item_id + start_time + buyout_price
-        # This is more reliable than the old _lot_key which could collide.
         start_time = getattr(lot, "start_time", None)
         lot_key = f"{item_id}_{start_time}_{buyout_price}_{amount}"
 
@@ -270,7 +268,6 @@ async def ingest_item_history(
     recorded = 0
     for price in history:
         qlt, upgrade_bonus = extract_quality(getattr(price, "additional", None))
-
         if qlt is None:
             continue
 
@@ -291,7 +288,7 @@ async def ingest_item_history(
             unit_price=unit_price,
             amount=amount,
             source="official_history",
-            confidence=0.80,  # Official API data is high-confidence
+            confidence=0.80,
             observed_at=sale_time.timestamp() if hasattr(sale_time, "timestamp") else time.time(),
         )
         recorded += 1
@@ -307,18 +304,7 @@ async def ingest_live_data(
     fetch_lots: bool = True,
     fetch_history: bool = True,
 ) -> dict[str, int]:
-    """Full live data ingestion: fetch lots + price history for all tracked artifacts.
-
-    Args:
-        db: MarketDB instance (created if None)
-        tracked_items: dict of item_id -> item_name (loaded from DB if None)
-        region: StalCraft region (defaults to env REGION)
-        fetch_lots: whether to fetch active auction lots
-        fetch_history: whether to fetch price history
-
-    Returns:
-        dict with 'lots_recorded', 'sales_recorded', 'items_processed', 'errors'
-    """
+    """Full live data ingestion: fetch lots + price history for all tracked artifacts."""
     region = region or REGION
     db = db or MarketDB()
     api = get_api_client()
@@ -363,7 +349,6 @@ async def ingest_live_data(
         lots_total, sales_total, len(tracked_items), errors,
     )
 
-    # Mark that we now have live data
     db.set_meta("live_data_ingested", "true")
     db.set_meta("last_ingestion", str(int(time.time())))
 
