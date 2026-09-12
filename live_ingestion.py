@@ -38,7 +38,7 @@ REGION = os.getenv("REGION", "na").lower()
 EXBO_CLIENT_ID = os.getenv("EXBO_CLIENT_ID", "")
 EXBO_CLIENT_SECRET = os.getenv("EXBO_CLIENT_SECRET", "")
 # How many lots to fetch per item (higher = catches expensive Rare/Exclusive/Legendary)
-LOT_LIMIT = int(os.getenv("LOT_LIMIT", "100"))
+LOT_LIMIT = int(os.getenv("LOT_LIMIT", os.getenv("AUCTION_LOT_LIMIT", "100")))
 # How many price-history records to fetch per item
 HISTORY_LIMIT = int(os.getenv("HISTORY_LIMIT", "50"))
 # Sleep between API calls to respect rate limits (seconds)
@@ -131,22 +131,12 @@ def extract_quality(additional: dict | None) -> tuple[int | None, float | None]:
     Returns (qlt, upgrade_bonus).  Returns (None, None) if quality cannot
     be determined — this is the critical fix for Rare/Exclusive/Legendary
     artifacts being silently treated as Common.
-
-    The scapi additional dict structure for auction lots:
-      {
-        "qlt": 3,              # quality tier 0-5
-        "upgrade_bonus": 0.08, # bonus fraction
-        "upgrade_level": 2,    # upgrade level
-        "bound": false,
-        ...
-      }
     """
     if not additional or not isinstance(additional, dict):
         return None, None
 
     qlt = additional.get("qlt")
     if qlt is None:
-        # Some lots use "quality" instead of "qlt"
         qlt = additional.get("quality")
 
     if qlt is not None:
@@ -158,10 +148,8 @@ def extract_quality(additional: dict | None) -> tuple[int | None, float | None]:
         except (ValueError, TypeError):
             qlt = None
 
-    # Upgrade bonus can be a float or a dict
     upgrade_bonus = additional.get("upgrade_bonus")
     if isinstance(upgrade_bonus, dict):
-        # Some formats: {"value": 0.08, ...}
         upgrade_bonus = upgrade_bonus.get("value", upgrade_bonus.get("amount"))
     if upgrade_bonus is not None:
         try:
@@ -174,7 +162,7 @@ def extract_quality(additional: dict | None) -> tuple[int | None, float | None]:
 
 # ─── Live lot ingestion ──────────────────────────────────────────────────────
 
-def ingest_item_lots(
+async def ingest_item_lots(
     api_client,
     db: MarketDB,
     item_id: str,
@@ -182,16 +170,13 @@ def ingest_item_lots(
     region: str = None,
     limit: int = None,
 ) -> int:
-    """Fetch active auction lots for one item and record them as snapshots.
-
-    Returns the number of lots recorded.
-    """
+    """Fetch active auction lots for one item and record them as snapshots."""
     region = region or REGION
     limit = limit or LOT_LIMIT
 
     try:
         from scapi.enums import SortAuction, Order
-        listing = api_client.auction(item_id).lots(
+        listing = await api_client.auction(item_id).lots(
             limit=limit,
             sort=SortAuction.BUYOUT_PRICE,
             order=Order.ASC,
@@ -202,12 +187,10 @@ def ingest_item_lots(
         log.error("Failed to fetch lots for %s (%s): %s", item_name, item_id, e)
         return 0
 
+    lots = list(listing)
     recorded = 0
-    for lot in listing:
+    for lot in lots:
         qlt, upgrade_bonus = extract_quality(getattr(lot, "additional", None))
-
-        # Skip lots where quality can't be determined — this prevents
-        # the old bug where unknown-quality lots were silently treated as Common.
         if qlt is None:
             continue
 
@@ -217,9 +200,6 @@ def ingest_item_lots(
             continue
 
         unit_price = buyout_price / max(amount, 1)
-
-        # Generate a unique lot key using item_id + start_time + buyout_price
-        # This is more reliable than the old _lot_key which could collide.
         start_time = getattr(lot, "start_time", None)
         lot_key = f"{item_id}_{start_time}_{buyout_price}_{amount}"
 
@@ -237,11 +217,11 @@ def ingest_item_lots(
         )
         recorded += 1
 
-    log.info("  %s: %d lots recorded (of %d fetched)", item_name, recorded, len(listing))
+    log.info("  %s: %d lots recorded (of %d fetched)", item_name, recorded, len(lots))
     return recorded
 
 
-def ingest_item_history(
+async def ingest_item_history(
     api_client,
     db: MarketDB,
     item_id: str,
@@ -249,15 +229,12 @@ def ingest_item_history(
     region: str = None,
     limit: int = None,
 ) -> int:
-    """Fetch completed-sale price history for one item and record as observations.
-
-    Returns the number of sales recorded.
-    """
+    """Fetch completed-sale price history for one item and record observations."""
     region = region or REGION
     limit = limit or HISTORY_LIMIT
 
     try:
-        listing = api_client.auction(item_id).price_history(
+        listing = await api_client.auction(item_id).price_history(
             limit=limit,
             additional=True,
             region=region,
@@ -266,10 +243,10 @@ def ingest_item_history(
         log.error("Failed to fetch price history for %s (%s): %s", item_name, item_id, e)
         return 0
 
+    history = list(listing)
     recorded = 0
-    for price in listing:
+    for price in history:
         qlt, upgrade_bonus = extract_quality(getattr(price, "additional", None))
-
         if qlt is None:
             continue
 
@@ -289,42 +266,31 @@ def ingest_item_history(
             bonus_bucket=bonus_bucket(upgrade_bonus),
             unit_price=unit_price,
             amount=amount,
-            source="official_price_history",
-            confidence=0.80,  # Official API data is high-confidence
-            observed_at=sale_time.isoformat() if hasattr(sale_time, "isoformat") else None,
+            source="official_history",
+            confidence=0.80,
+            observed_at=sale_time.timestamp() if hasattr(sale_time, "timestamp") else time.time(),
         )
         recorded += 1
 
-    log.info("  %s: %d sales recorded (of %d fetched)", item_name, recorded, len(listing))
+    log.info("  %s: %d sales recorded (of %d fetched)", item_name, recorded, len(history))
     return recorded
 
 
-def ingest_live_data(
+async def ingest_live_data(
     db: MarketDB | None = None,
     tracked_items: dict[str, str] | None = None,
     region: str = None,
     fetch_lots: bool = True,
     fetch_history: bool = True,
 ) -> dict[str, int]:
-    """Full live data ingestion: fetch lots + price history for all tracked artifacts.
-
-    Args:
-        db: MarketDB instance (created if None)
-        tracked_items: dict of item_id -> item_name (loaded from DB if None)
-        region: StalCraft region (defaults to env REGION)
-        fetch_lots: whether to fetch active auction lots
-        fetch_history: whether to fetch price history
-
-    Returns:
-        dict with 'lots_recorded', 'sales_recorded', 'items_processed', 'errors'
-    """
+    """Full live data ingestion: fetch lots + price history for all tracked artifacts."""
     region = region or REGION
     db = db or MarketDB()
     api = get_api_client()
 
     if tracked_items is None:
         try:
-            tracked_items = asyncio.run(load_tradeable_artifacts())
+            tracked_items = await load_tradeable_artifacts()
         except Exception as e:
             log.error("Failed to load tradeable artifacts: %s", e)
             tracked_items = {}
@@ -344,25 +310,22 @@ def ingest_live_data(
 
         try:
             if fetch_lots:
-                n = ingest_item_lots(api, db, item_id, item_name, region)
-                lots_total += n
-                time.sleep(API_SLEEP)
+                lots_total += await ingest_item_lots(api, db, item_id, item_name, region)
+                await asyncio.sleep(API_SLEEP)
 
             if fetch_history:
-                n = ingest_item_history(api, db, item_id, item_name, region)
-                sales_total += n
-                time.sleep(API_SLEEP)
+                sales_total += await ingest_item_history(api, db, item_id, item_name, region)
+                await asyncio.sleep(API_SLEEP)
         except Exception as e:
             log.error("Error processing %s: %s", item_name, e)
             errors += 1
-            time.sleep(API_SLEEP * 2)
+            await asyncio.sleep(API_SLEEP * 2)
 
     log.info(
         "Live ingestion complete: %d lots, %d sales, %d items, %d errors",
         lots_total, sales_total, len(tracked_items), errors,
     )
 
-    # Mark that we now have live data
     db.set_meta("live_data_ingested", "true")
     db.set_meta("last_ingestion", str(int(time.time())))
 
@@ -382,9 +345,9 @@ if __name__ == "__main__":
     parser.add_argument("--region", default=None, help="StalCraft region (default: from env)")
     args = parser.parse_args()
 
-    result = ingest_live_data(
+    result = asyncio.run(ingest_live_data(
         region=args.region,
         fetch_lots=not args.history_only,
         fetch_history=not args.lots_only,
-    )
+    ))
     print(f"\nResult: {result}")
