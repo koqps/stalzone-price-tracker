@@ -22,6 +22,15 @@ log = logging.getLogger("bot_integration")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-7s  %(name)s  %(message)s")
 
 REGION = os.getenv("REGION", "na").lower()
+SALE_RECENCY_DAYS = int(os.getenv("SALE_RECENCY_DAYS", "14"))
+QUALITY_MULTIPLIERS = {
+    0: 1.0,
+    1: 1.20,
+    2: 1.50,
+    3: 2.50,
+    4: 4.00,
+    5: 6.00,
+}
 
 # ─── FIXED: Quality detection ───────────────────────────────────────────────
 
@@ -235,19 +244,46 @@ async def evaluate_lot_with_model(
     upgrade_bonus: float | None,
     region: str = None,
 ) -> ValuationResult:
-    """Use the confidence-weighted price model to evaluate an artifact."""
+    """Build valuation evidence from MarketDB and persist the resulting report."""
     region = region or REGION
-    res = compute_valuation(
-        db=db,
+    bucket = bonus_bucket(upgrade_bonus)
+    since = time.time() - SALE_RECENCY_DAYS * 86400
+
+    live_rows = db.latest_snapshot(item_id, region, since)
+    live_prices = [
+        r["unit_price"] for r in live_rows
+        if r["qlt"] == qlt and r["bonus_bucket"] == bucket and r["unit_price"]
+    ]
+
+    sale_rows = db.recent_sales(item_id, region, qlt, bucket, since)
+    confirmed = [r["unit_price"] for r in sale_rows if r["source"] == "confirmed_bid_sale"]
+    inferred = [r["unit_price"] for r in sale_rows if r["source"] == "inferred_buyout_sale"]
+    official = [r["unit_price"] for r in sale_rows if r["source"] == "official_history"]
+
+    community_rows = db.recent_community_signals(item_name, region, since)
+    community_signals = [
+        {"sentiment_score": r["sentiment_score"], "confidence": r["confidence"]}
+        for r in community_rows
+    ]
+
+    manual = db.manual_price(item_id, region, qlt, upgrade_bonus or 0.0)
+    result = compute_valuation(
         item_id=item_id,
         item_name=item_name,
-        qlt=qlt,
-        upgrade_bonus=upgrade_bonus or 0.0,
         region=region,
+        qlt=qlt,
+        bonus_bucket=bucket,
+        live_comparable_unit_prices=live_prices,
+        confirmed_sale_prices=confirmed,
+        inferred_sale_prices=inferred,
+        official_history_prices=official,
+        quality_multiplier=QUALITY_MULTIPLIERS.get(qlt, 1.0),
+        community_signals=community_signals,
+        manual_override=dict(manual) if manual else None,
     )
-    if hasattr(res, "__await__"):
-        res = await res
-    return res
+
+    db.record_valuation(**result.as_row())
+    return result
 
 
 async def should_alert_lot(
@@ -276,7 +312,7 @@ async def should_alert_lot(
     amount = getattr(current_lot, "amount", 1) or 1
     unit_price = buyout / max(amount, 1)
 
-    if result.fair_value <= 0:
+    if not result.fair_value or result.fair_value <= 0:
         return False, result, "Fair value is zero"
 
     margin_pct = ((result.fair_value - unit_price) / result.fair_value) * 100
