@@ -23,7 +23,8 @@ import threading
 from pathlib import Path
 
 import uvicorn
-from fastapi.responses import FileResponse
+from fastapi import Request
+from fastapi.responses import FileResponse, JSONResponse
 from scapi.config import Config
 
 # scapi's DatabaseLookup pre-syncs using Config.REALM. Keep it aligned with
@@ -39,11 +40,23 @@ log = logging.getLogger("combined")
 # static directory at /static. Keep the legacy URL working so existing clients
 # receive the actual dashboard script instead of a 404.
 _DASHBOARD_APP_JS = Path(__file__).parent / "dashboard" / "static" / "app.js"
+_ALLOW_SAMPLE_SEED = os.getenv("ALLOW_SAMPLE_SEED", "false").lower() == "true"
 
 
 @app.get("/app.js", include_in_schema=False)
 def dashboard_app_js() -> FileResponse:
     return FileResponse(str(_DASHBOARD_APP_JS), media_type="application/javascript")
+
+
+@app.middleware("http")
+async def protect_live_market_data(request: Request, call_next):
+    """Prevent the demo seed endpoint from clearing production market data."""
+    if request.url.path == "/api/seed" and not _ALLOW_SAMPLE_SEED:
+        return JSONResponse(
+            status_code=403,
+            content={"ok": False, "message": "Sample seeding is disabled on this deployment."},
+        )
+    return await call_next(request)
 
 
 def run_bot() -> None:
