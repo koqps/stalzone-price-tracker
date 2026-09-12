@@ -20,8 +20,10 @@ import asyncio
 import logging
 import os
 import threading
+from pathlib import Path
 
 import uvicorn
+from fastapi.responses import FileResponse
 from scapi.config import Config
 
 # scapi's DatabaseLookup pre-syncs using Config.REALM. Keep it aligned with
@@ -32,6 +34,16 @@ from dashboard.server import app  # FastAPI app (serves API + static frontend)
 from bot import bot, DISCORD_TOKEN  # Discord bot instance + its token
 
 log = logging.getLogger("combined")
+
+# index.html historically references ./app.js, while the dashboard mounts its
+# static directory at /static. Keep the legacy URL working so existing clients
+# receive the actual dashboard script instead of a 404.
+_DASHBOARD_APP_JS = Path(__file__).parent / "dashboard" / "static" / "app.js"
+
+
+@app.get("/app.js", include_in_schema=False)
+def dashboard_app_js() -> FileResponse:
+    return FileResponse(str(_DASHBOARD_APP_JS), media_type="application/javascript")
 
 
 def run_bot() -> None:
