@@ -22,6 +22,11 @@ import os
 import threading
 
 import uvicorn
+from scapi.config import Config
+
+# scapi's DatabaseLookup pre-syncs using Config.REALM. Keep it aligned with
+# the application's realm so a global lookup does not preload only RU indexes.
+Config.REALM = os.getenv("REALM", "global").lower()
 
 from dashboard.server import app  # FastAPI app (serves API + static frontend)
 from bot import bot, DISCORD_TOKEN  # Discord bot instance + its token
