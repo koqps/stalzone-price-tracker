@@ -91,7 +91,12 @@ def get_db_lookup():
 # ─── Tradeable artifact discovery ────────────────────────────────────────────
 
 async def load_tradeable_artifacts() -> dict[str, str]:
-    """Load all tradeable artifacts from the stalcraft-database.
+    """Load artifact item IDs/names from the global STALZONE item listing.
+
+    The current database listing does not expose legacy ``category`` or
+    ``tradeable`` fields. Artifact membership is authoritative in the ``data``
+    path (``/items/artefact/...``). Auction availability is checked later by
+    the market API, so discovery should not eliminate valid artifacts here.
 
     Returns a dict mapping item_id -> item_name.
     """
@@ -100,23 +105,23 @@ async def load_tradeable_artifacts() -> dict[str, str]:
     artifacts: dict[str, str] = {}
 
     for item_id, data in all_items.items():
-        # Items in the database have a "category" field.
-        # Artifacts are under "artefact" or "artifact" category.
-        category = (data.get("category") or "").lower()
-        sub_category = (data.get("sub_category") or "").lower()
-        name = data.get("name", {}).get("en", data.get("name", "")) if isinstance(data.get("name"), dict) else data.get("name", item_id)
+        data_path = str(data.get("data") or "").lower()
+        if "/items/artefact/" not in data_path:
+            continue
 
-        # Check if it's an artifact (various possible category names)
-        is_artifact = any(k in category or k in sub_category
-                          for k in ("artefact", "artifact", "art"))
+        name_data = data.get("name") or {}
+        if isinstance(name_data, dict):
+            lines = name_data.get("lines") or {}
+            if isinstance(lines, dict):
+                name = lines.get("en") or lines.get("ru") or item_id
+            else:
+                name = item_id
+        else:
+            name = name_data or item_id
 
-        # Check if tradeable (some items have a tradeable flag, others are implicitly tradeable)
-        tradeable = data.get("tradeable", True)
+        artifacts[item_id] = str(name)
 
-        if is_artifact and tradeable:
-            artifacts[item_id] = str(name)
-
-    log.info("Loaded %d tradeable artifacts from stalcraft-database", len(artifacts))
+    log.info("Loaded %d artifacts from stalzone-database", len(artifacts))
     return artifacts
 
 
