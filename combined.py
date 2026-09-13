@@ -12,9 +12,12 @@ from scapi.config import Config
 Config.REALM = os.getenv("REALM", "global").lower()
 
 from dashboard.server import app
+from dashboard.opportunities import router as opportunities_router
 import bot as bot_module
 from bot_catalog_commands import register_catalog_commands
 from patch_monitor import collect_official_patch_signals
+
+app.include_router(opportunities_router)
 
 bot = bot_module.bot
 DISCORD_TOKEN = bot_module.DISCORD_TOKEN
