@@ -1,46 +1,78 @@
-"""
-combined.py — Runs the Discord bot and the FastAPI dashboard together in a
-single process so both share the same market database.
-"""
+"""Run the Discord bot, dashboard, persistence, and patch monitor together."""
 from __future__ import annotations
 
 import logging
 import os
 import threading
+import time
 
 import uvicorn
 from scapi.config import Config
 
-# DatabaseLookup uses Config.REALM for its initial sync. Keep it aligned with
-# the international/global database used by the NA market tracker.
 Config.REALM = os.getenv("REALM", "global").lower()
 
-# Patch auction parsing before bot.py imports function references. This makes
-# rarity + enhancement level (+0 ... +15) the actual market-comparison key.
-import upgrade_runtime_patch  # noqa: F401,E402
-
 from dashboard.server import app
-from bot import bot, DISCORD_TOKEN, REGION
+import bot as bot_module
 from bot_catalog_commands import register_catalog_commands
+from patch_monitor import collect_official_patch_signals
 
+bot = bot_module.bot
+DISCORD_TOKEN = bot_module.DISCORD_TOKEN
+REGION = bot_module.REGION
 log = logging.getLogger("combined")
 
-# Register the official metadata + observed market command before Discord sync.
+# Correct quality colors everywhere, including the older bot.py embed paths.
+bot_module.QUALITY_COLORS = {
+    0: 0x8B8F86,
+    1: 0x79B84B,
+    2: 0x4F98D1,
+    3: 0x9A63D8,
+    4: 0xE05252,  # Exclusive = red
+    5: 0xE6A33C,  # Legendary = amber/gold
+}
+
+# bot.py's manual /scan calls the sender after scan_all_items already did. Wrap
+# the sender so the same lot cannot be broadcast twice within five minutes.
+_original_send_discord_alerts = bot_module.send_discord_alerts
+_sent_lots: dict[str, float] = {}
+
+
+async def _deduped_send_discord_alerts(alerts: list[dict]):
+    now = time.time()
+    fresh = []
+    for alert in alerts:
+        key = str(alert.get("lot_key") or "")
+        if key and now - _sent_lots.get(key, 0) < 300:
+            continue
+        if key:
+            _sent_lots[key] = now
+        fresh.append(alert)
+    if fresh:
+        await _original_send_discord_alerts(fresh)
+
+
+bot_module.send_discord_alerts = _deduped_send_discord_alerts
 register_catalog_commands(bot, region=REGION)
 
 
 def run_bot() -> None:
-    """Run the Discord bot in a background thread with its own event loop."""
     if not DISCORD_TOKEN:
-        log.warning(
-            "DISCORD_TOKEN is not set — skipping bot startup. "
-            "The dashboard will still run, but no live data will be ingested."
-        )
+        log.warning("DISCORD_TOKEN is not set — dashboard will run without live ingestion")
         return
     try:
         bot.run(DISCORD_TOKEN)
     except Exception:
         log.exception("Discord bot crashed")
+
+
+def run_patch_monitor() -> None:
+    interval = max(3600, int(os.getenv("PATCH_MONITOR_INTERVAL", "21600")))
+    while True:
+        try:
+            collect_official_patch_signals()
+        except Exception:
+            log.exception("Official patch monitor failed")
+        time.sleep(interval)
 
 
 def main() -> None:
@@ -49,6 +81,7 @@ def main() -> None:
         format="%(asctime)s  %(levelname)-7s  %(name)s  %(message)s",
     )
     threading.Thread(target=run_bot, daemon=True, name="discord-bot").start()
+    threading.Thread(target=run_patch_monitor, daemon=True, name="patch-monitor").start()
     port = int(os.getenv("PORT", "8420"))
     uvicorn.run(app, host="0.0.0.0", port=port)
 
