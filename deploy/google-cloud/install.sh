@@ -38,8 +38,9 @@ python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
 
 if [[ ! -f "$ENV_FILE" ]]; then
-  echo "Enter the existing tracker secrets from Render. Hidden values stay only on this VM."
-  read -r -s -p "DISCORD_TOKEN: " DISCORD_TOKEN; echo
+  echo "Enter the existing tracker secrets from Render. Values stay only on this VM."
+  echo "NOTE: DISCORD_TOKEN is temporarily visible while typing because Google browser SSH can block hidden-input prompts."
+  read -r -p "DISCORD_TOKEN: " DISCORD_TOKEN
   read -r -p "EXBO_CLIENT_ID: " EXBO_CLIENT_ID
   read -r -s -p "EXBO_CLIENT_SECRET: " EXBO_CLIENT_SECRET; echo
   read -r -p "SUPABASE_SYNC_URL: " SUPABASE_SYNC_URL
