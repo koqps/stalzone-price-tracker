@@ -24,26 +24,35 @@ if ! swapon --show | grep -q /swapfile; then
 fi
 
 id -u "$APP_USER" >/dev/null 2>&1 || useradd --system --create-home --shell /usr/sbin/nologin "$APP_USER"
-if [[ ! -d "$APP_DIR/.git" ]]; then git clone --branch "$BRANCH" --depth 1 "$REPO_URL" "$APP_DIR"; else git -C "$APP_DIR" fetch origin "$BRANCH" && git -C "$APP_DIR" reset --hard "origin/$BRANCH"; fi
+if [[ ! -d "$APP_DIR/.git" ]]; then
+  git clone --branch "$BRANCH" --depth 1 "$REPO_URL" "$APP_DIR"
+else
+  git -C "$APP_DIR" fetch origin "$BRANCH"
+  git -C "$APP_DIR" reset --hard "origin/$BRANCH"
+fi
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/pip" install --upgrade pip
 "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
 
 if [[ ! -f "$ENV_FILE" ]]; then
-  echo "Enter existing tracker secrets. Hidden values are stored only on this VM."
+  echo "Enter the existing tracker secrets from Render. Hidden values stay only on this VM."
   read -r -s -p "DISCORD_TOKEN: " DISCORD_TOKEN; echo
+  read -r -p "EXBO_CLIENT_ID: " EXBO_CLIENT_ID
+  read -r -s -p "EXBO_CLIENT_SECRET: " EXBO_CLIENT_SECRET; echo
   read -r -p "SUPABASE_SYNC_URL: " SUPABASE_SYNC_URL
-  read -r -s -p "SUPABASE_SYNC_SECRET: " SUPABASE_SYNC_SECRET; echo
-  read -r -p "DISCORD_ALERT_WEBHOOK (optional): " DISCORD_ALERT_WEBHOOK
+  read -r -s -p "SUPABASE_TRACKER_SECRET: " SUPABASE_TRACKER_SECRET; echo
   read -r -p "CHANNEL_ID (optional): " CHANNEL_ID
+  read -r -p "TARGET_GUILD_IDS (optional): " TARGET_GUILD_IDS
   cat > "$ENV_FILE" <<EOF
 DISCORD_TOKEN=$DISCORD_TOKEN
+EXBO_CLIENT_ID=$EXBO_CLIENT_ID
+EXBO_CLIENT_SECRET=$EXBO_CLIENT_SECRET
 SUPABASE_SYNC_URL=$SUPABASE_SYNC_URL
-SUPABASE_SYNC_SECRET=$SUPABASE_SYNC_SECRET
-DISCORD_ALERT_WEBHOOK=$DISCORD_ALERT_WEBHOOK
+SUPABASE_TRACKER_SECRET=$SUPABASE_TRACKER_SECRET
 CHANNEL_ID=$CHANNEL_ID
-LIVE_MARKET_DATA=true
+TARGET_GUILD_IDS=$TARGET_GUILD_IDS
+LIVE_MARKET_DATA=false
 REGION=na
 REALM=global
 PORT=$PORT
@@ -52,12 +61,14 @@ EOF
   chmod 600 "$ENV_FILE"
 fi
 
-mkdir -p "$APP_DIR/cache" && chown -R "$APP_USER:$APP_USER" "$APP_DIR/cache"
+mkdir -p "$APP_DIR/cache"
+chown -R "$APP_USER:$APP_USER" "$APP_DIR/cache"
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=StalZone Market Tracker
 After=network-online.target
 Wants=network-online.target
+
 [Service]
 Type=simple
 User=$APP_USER
@@ -72,6 +83,7 @@ PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
 ReadWritePaths=$APP_DIR/cache
+
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -100,4 +112,5 @@ systemctl enable --now stalzone-tracker
 sleep 3
 curl -fsS "http://127.0.0.1:$PORT/health" || curl -fsS "http://127.0.0.1:$PORT/" >/dev/null
 systemctl --no-pager status stalzone-tracker || true
-echo "Install complete. Open http://VM_EXTERNAL_IP/ after allowing HTTP traffic in Google Cloud firewall."
+echo "Install complete. LIVE_MARKET_DATA is false for migration safety."
+echo "After verification, enable alerts by setting LIVE_MARKET_DATA=true in $ENV_FILE and restarting the service."
