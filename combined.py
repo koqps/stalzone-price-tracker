@@ -27,6 +27,7 @@ app.include_router(build_calculator_router)
 
 _INDEX_PATH = Path(__file__).parent / "dashboard" / "static" / "index.html"
 _NORMALIZED_ARTIFACTS_URL = "https://raw.githubusercontent.com/will-bot2026/stalcraft_v1/main/data/normalized-exbo/artifacts.json"
+_NORMALIZED_CACHE_PATH = Path(__file__).parent / ".artifact-market-metadata.json"
 _normalized_fallback_cache: tuple[float, dict[str, dict]] | None = None
 
 _CLASS_LABELS = {
@@ -38,14 +39,40 @@ _CLASS_LABELS = {
 }
 
 
+def _read_persistent_metadata() -> dict[str, dict]:
+    """Read the last successful normalized metadata snapshot without network I/O."""
+    try:
+        if not _NORMALIZED_CACHE_PATH.exists():
+            return {}
+        data = json.loads(_NORMALIZED_CACHE_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        logging.getLogger("combined").exception("Could not read artifact metadata cache")
+        return {}
+
+
+def _cached_normalized_metadata() -> dict[str, dict]:
+    """Return metadata already in memory/on disk. Never performs network I/O."""
+    global _normalized_fallback_cache
+    if _normalized_fallback_cache:
+        return _normalized_fallback_cache[1]
+    disk = _read_persistent_metadata()
+    if disk:
+        _normalized_fallback_cache = (time.time(), disk)
+    return disk
+
+
 def _normalized_artifact_metadata() -> dict[str, dict]:
-    """Small independent fallback for class/stat metadata when scapi catalog lookup fails."""
+    """Refresh class/stat metadata in the background; never called by request handlers."""
     global _normalized_fallback_cache
     now = time.time()
     if _normalized_fallback_cache and now - _normalized_fallback_cache[0] < 6 * 3600:
         return _normalized_fallback_cache[1]
     try:
-        req = urllib.request.Request(_NORMALIZED_ARTIFACTS_URL, headers={"User-Agent": "stalzone-price-tracker/2.0"})
+        req = urllib.request.Request(
+            _NORMALIZED_ARTIFACTS_URL,
+            headers={"User-Agent": "stalzone-price-tracker/2.0"},
+        )
         with urllib.request.urlopen(req, timeout=12) as resp:
             rows = json.loads(resp.read().decode("utf-8"))
         grouped: dict[str, list[dict]] = {}
@@ -93,15 +120,22 @@ def _normalized_artifact_metadata() -> dict[str, dict]:
                 "stat_groups": [],
             }
         _normalized_fallback_cache = (time.time(), out)
+        try:
+            _NORMALIZED_CACHE_PATH.write_text(
+                json.dumps(out, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
+        except Exception:
+            logging.getLogger("combined").exception("Could not persist artifact metadata cache")
         return out
     except Exception:
-        logging.getLogger("combined").exception("Normalized artifact metadata fallback failed")
-        return {}
+        logging.getLogger("combined").exception("Background artifact metadata refresh failed")
+        return _cached_normalized_metadata()
 
 
 def _observed_artifact_fallback() -> list[dict]:
-    """Return real observed identities enriched with independent normalized metadata."""
-    meta = _normalized_artifact_metadata()
+    """Return the market artifact list immediately using local DB + cached metadata only."""
+    meta = _cached_normalized_metadata()
     with db._conn() as conn:
         rows = conn.execute(
             "SELECT item_id, MAX(item_name) item_name FROM ("
@@ -114,6 +148,7 @@ def _observed_artifact_fallback() -> list[dict]:
     for r in rows:
         item_id = str(r["item_id"])
         m = meta.get(item_id) or {}
+        enriched = bool(m)
         result.append({
             "item_id": item_id,
             "item_name": str(m.get("item_name") or r["item_name"] or item_id),
@@ -122,24 +157,23 @@ def _observed_artifact_fallback() -> list[dict]:
             "description": "",
             "stats": m.get("stats") or [],
             "stat_groups": m.get("stat_groups") or [],
-            "source": "normalized_exbo_plus_observed_market_fallback" if m else "observed_tracker_database_fallback",
-            "metadata_degraded": True,
+            "source": "normalized_exbo_cached_plus_observed_market" if enriched else "observed_tracker_database_fast",
+            "metadata_degraded": not enriched,
         })
     return sorted(result, key=lambda x: x["item_name"].lower())
 
 
 @app.middleware("http")
 async def keep_artifact_api_available(request, call_next):
-    """Do not let a temporary upstream catalog outage blank the market UI."""
-    try:
-        return await call_next(request)
-    except Exception:
-        if request.method == "GET" and request.url.path == "/api/artifacts":
-            logging.getLogger("combined").exception(
-                "Official artifact catalog failed; serving enriched observed fallback"
-            )
-            return JSONResponse(_observed_artifact_fallback(), headers={"X-Stalzone-Metadata": "degraded"})
-        raise
+    """Serve /api/artifacts without any upstream network dependency."""
+    if request.method == "GET" and request.url.path == "/api/artifacts":
+        rows = _observed_artifact_fallback()
+        degraded = any(bool(row.get("metadata_degraded")) for row in rows)
+        return JSONResponse(
+            rows,
+            headers={"X-Stalzone-Metadata": "warming" if degraded else "cached-normalized"},
+        )
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -157,7 +191,7 @@ async def inject_build_calculator_tab(request, call_next):
             )
             html = html.replace(
                 "</body>",
-                "<script>(()=>{const v=new URLSearchParams(location.search).get('view');if(v){const b=document.querySelector(`.nav button[data-view=\"${v}\"]`);if(b)setTimeout(()=>b.click(),0)}})();</script></body>",
+                "<script src=\"/static/market-ui-resilience.js?v=1\"></script><script>(()=>{const v=new URLSearchParams(location.search).get('view');if(v){const b=document.querySelector(`.nav button[data-view=\"${v}\"]`);if(b)setTimeout(()=>b.click(),0)}})();</script></body>",
                 1,
             )
         return HTMLResponse(html)
@@ -224,11 +258,21 @@ def run_patch_monitor() -> None:
         time.sleep(interval)
 
 
+def warm_artifact_metadata() -> None:
+    """Refresh rich market metadata after startup without delaying HTTP readiness."""
+    try:
+        rows = _normalized_artifact_metadata()
+        log.info("Artifact market metadata warmup ready: %s items", len(rows))
+    except Exception:
+        log.exception("Artifact market metadata warmup failed")
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s  %(levelname)-7s  %(name)s  %(message)s",
     )
+    threading.Thread(target=warm_artifact_metadata, daemon=True, name="artifact-metadata").start()
     if COLLECTOR_ENABLED:
         log.info("Collector enabled: starting Discord bot, ingestion, and patch monitor")
         threading.Thread(target=run_bot, daemon=True, name="discord-bot").start()
