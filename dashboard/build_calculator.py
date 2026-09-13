@@ -1,8 +1,9 @@
-"""Build calculator routes and normalized calculator data.
+"""Build calculator routes and source-truthed calculator data.
 
-The calculator consumes normalized STALCRAFT artifact/container data from the
-MIT-licensed UltimateBuild project, while prices still come from this tracker's
-observed NA auction database. The remote normalized data is cached in memory.
+Artifact stat ranges are refreshed from the current EXBO-normalized dataset.
+The older normalized dataset is used only for optional-trait/unit metadata where
+it is still useful, while live prices remain sourced from this tracker's NA
+market observations.
 """
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ import asyncio
 import json
 import time
 import urllib.request
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -21,15 +23,17 @@ from artifact_catalog import load_artifact_catalog
 router = APIRouter()
 STATIC_DIR = Path(__file__).parent / "static"
 CACHE_TTL = 6 * 60 * 60
-ARTIFACTS_URL = "https://raw.githubusercontent.com/will-bot2026/stalcraft_v1/main/data/normalized/artifacts.json"
-CONTAINERS_URL = "https://raw.githubusercontent.com/will-bot2026/stalcraft_v1/main/data/normalized/containers.json"
+CURRENT_ARTIFACTS_URL = "https://raw.githubusercontent.com/will-bot2026/stalcraft_v1/main/data/normalized-exbo/artifacts.json"
+LEGACY_ARTIFACTS_URL = "https://raw.githubusercontent.com/will-bot2026/stalcraft_v1/main/data/normalized/artifacts.json"
+CONTAINERS_URL = "https://raw.githubusercontent.com/will-bot2026/stalcraft_v1/main/data/normalized-exbo/containers.json"
+LEGACY_CONTAINERS_URL = "https://raw.githubusercontent.com/will-bot2026/stalcraft_v1/main/data/normalized/containers.json"
 EXBO_RAW_BASE = "https://raw.githubusercontent.com/EXBO-Studio/stalzone-database/main/global"
 _cache: dict[str, tuple[float, Any]] = {}
 
 
 def _download_json(url: str) -> Any:
-    req = urllib.request.Request(url, headers={"User-Agent": "stalzone-price-tracker/1.0"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
+    req = urllib.request.Request(url, headers={"User-Agent": "stalzone-price-tracker/2.0"})
+    with urllib.request.urlopen(req, timeout=25) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -54,10 +58,49 @@ def _stat_defs(rows: list[dict], containers: list[dict]) -> dict[str, dict]:
 
 
 def _fallback_positive(key: str, minimum: float, maximum: float) -> bool:
-    # Positive accumulation is harmful; negative accumulation is beneficial.
     if key.endswith("_accumulation"):
         return max(minimum, maximum) <= 0
     return True
+
+
+def _level_zero_row(rows: list[dict]) -> dict:
+    """Pick the +0 definition from the EXBO-normalized 16-level row group.
+
+    The upstream export currently contains one row per +0..+15 level but does
+    not retain the level field. +level increases beneficial magnitudes by 2%
+    each step, so +0 is the row with the smallest beneficial magnitude. Harmful
+    endpoints are level-invariant, making any tied row equivalent.
+    """
+    if not rows:
+        return {}
+
+    def score(row: dict) -> tuple[float, float]:
+        positives = [s for s in row.get("stats") or [] if s.get("isPositive")]
+        if positives:
+            return (
+                sum(abs(float(s.get("max") or 0)) for s in positives),
+                sum(abs(float(s.get("min") or 0)) for s in positives),
+            )
+        all_stats = row.get("stats") or []
+        return (sum(abs(float(s.get("max") or 0)) for s in all_stats), 0.0)
+
+    return min(rows, key=score)
+
+
+def _merge_stat_metadata(stats: list[dict], defs: dict[str, dict]) -> list[dict]:
+    out = []
+    for stat in stats:
+        row = dict(stat)
+        key = str(row.get("key") or "")
+        known = defs.get(key) or {}
+        if known:
+            # Current EXBO values win; legacy metadata is only for display/unit
+            # details that the newer normalized export does not always preserve.
+            row["name"] = known.get("name") or row.get("name")
+            row["isPercentage"] = bool(known.get("isPercentage", row.get("isPercentage", False)))
+        row["origin"] = "artefact"
+        out.append(row)
+    return out
 
 
 def _fallback_artifact(item_id: str, official: dict, stat_defs: dict[str, dict]) -> dict:
@@ -98,34 +141,54 @@ def _fallback_artifact(item_id: str, official: dict, stat_defs: dict[str, dict])
         "icon_url": official.get("icon_url"),
         "artifact_class": official.get("artifact_class") or "Artifact",
         "description": official.get("description") or "",
-        "calculator_source": "current EXBO fallback",
+        "calculator_source": "current official EXBO item",
     }
 
 
 @router.get("/api/build-calculator-data")
 async def build_calculator_data():
-    artifacts_raw, containers = await asyncio.gather(
-        _cached_json("artifacts", ARTIFACTS_URL),
-        _cached_json("containers", CONTAINERS_URL),
+    current_rows, legacy_rows, containers, legacy_containers = await asyncio.gather(
+        _cached_json("current-artifacts", CURRENT_ARTIFACTS_URL),
+        _cached_json("legacy-artifacts", LEGACY_ARTIFACTS_URL),
+        _cached_json("current-containers", CONTAINERS_URL),
+        _cached_json("legacy-containers", LEGACY_CONTAINERS_URL),
     )
     catalog = await load_artifact_catalog()
-    normalized = {str(row.get("id") or ""): row for row in artifacts_raw if row.get("id")}
-    stat_defs = _stat_defs(artifacts_raw, containers)
+    legacy = {str(row.get("id") or ""): row for row in legacy_rows if row.get("id")}
+    stat_defs = _stat_defs(legacy_rows, legacy_containers)
+
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for row in current_rows:
+        item_id = str(row.get("id") or "")
+        if item_id:
+            grouped[item_id].append(row)
 
     artifacts = []
     for item_id, official in catalog.items():
-        row = normalized.get(item_id)
-        if row:
+        source_rows = grouped.get(item_id) or []
+        if source_rows:
+            current = _level_zero_row(source_rows)
+            old = legacy.get(item_id) or {}
             artifacts.append({
-                **row,
+                "id": item_id,
+                "name": official.get("item_name") or current.get("name") or item_id,
+                "category": current.get("category") or old.get("category") or "artefact/other_arts",
+                "rarity": old.get("rarity") or "rarity.ordinary",
+                "level": 0,
+                "quality": 100,
+                "stats": _merge_stat_metadata(current.get("stats") or [], stat_defs),
+                "additionalStats": old.get("additionalStats") or [],
                 "icon_url": official.get("icon_url"),
-                "artifact_class": official.get("artifact_class") or str(row.get("category") or "").split("/")[-1].replace("_", " ").title(),
+                "artifact_class": official.get("artifact_class") or str(current.get("category") or "").split("/")[-1].replace("_", " ").title(),
                 "description": official.get("description") or "",
-                "calculator_source": "UltimateBuild normalized",
+                "calculator_source": "current EXBO-normalized +0 ranges",
             })
         else:
             try:
-                artifacts.append(await asyncio.to_thread(_fallback_artifact, item_id, official, stat_defs))
+                fallback = await asyncio.to_thread(_fallback_artifact, item_id, official, stat_defs)
+                old = legacy.get(item_id) or {}
+                fallback["additionalStats"] = old.get("additionalStats") or []
+                artifacts.append(fallback)
             except Exception:
                 artifacts.append({
                     "id": item_id,
@@ -150,7 +213,7 @@ async def build_calculator_data():
     return {
         "artifacts": artifacts,
         "containers": containers,
-        "source": "UltimateBuild normalized STALCRAFT data + current EXBO fallback",
+        "source": "current EXBO-normalized artifact ranges + official catalog metadata",
         "license": "MIT",
         "updated_at": time.time(),
     }
