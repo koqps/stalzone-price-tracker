@@ -58,6 +58,9 @@ def _stat_defs(rows: list[dict], containers: list[dict]) -> dict[str, dict]:
 
 
 def _fallback_positive(key: str, minimum: float, maximum: float) -> bool:
+    # Accumulation values are directional: negative reduces load (beneficial),
+    # positive adds load (harmful). Do not inherit this classification globally
+    # because the same stat key legitimately appears with both signs.
     if key.endswith("_accumulation"):
         return max(minimum, maximum) <= 0
     return True
@@ -94,8 +97,8 @@ def _merge_stat_metadata(stats: list[dict], defs: dict[str, dict]) -> list[dict]
         key = str(row.get("key") or "")
         known = defs.get(key) or {}
         if known:
-            # Current EXBO values win; legacy metadata is only for display/unit
-            # details that the newer normalized export does not always preserve.
+            # Current EXBO values and sign classification win; legacy metadata
+            # is used only for display names/units missing from newer exports.
             row["name"] = known.get("name") or row.get("name")
             row["isPercentage"] = bool(known.get("isPercentage", row.get("isPercentage", False)))
         row["origin"] = "artefact"
@@ -103,9 +106,18 @@ def _merge_stat_metadata(stats: list[dict], defs: dict[str, dict]) -> list[dict]
     return out
 
 
+def _official_stats_by_name(official: dict) -> dict[str, dict]:
+    return {
+        str(row.get("name") or "").strip().lower(): row
+        for row in official.get("stats") or []
+        if row.get("name")
+    }
+
+
 def _fallback_artifact(item_id: str, official: dict, stat_defs: dict[str, dict]) -> dict:
     path = str(official.get("data_path") or "").strip("/")
     raw = _download_json(f"{EXBO_RAW_BASE}/{path}") if path else {}
+    official_stats = _official_stats_by_name(official)
     stats = []
     for block in raw.get("infoBlocks") or []:
         for element in block.get("elements") or []:
@@ -120,13 +132,27 @@ def _fallback_artifact(item_id: str, official: dict, stat_defs: dict[str, dict])
             known = stat_defs.get(key) or {}
             lines = name_obj.get("lines") if isinstance(name_obj, dict) else None
             name = str((lines or {}).get("en") or known.get("name") or key.rsplit(".", 1)[-1].replace("_", " ").title())
+            official_stat = official_stats.get(name.strip().lower()) or {}
+
+            # Accumulation sign is artifact-specific and must always come from
+            # the actual values. For other families prefer the current official
+            # tooltip color classification, then fall back to normalized metadata.
+            if key.endswith("_accumulation"):
+                is_positive = _fallback_positive(key, minimum, maximum)
+            elif official_stat:
+                is_positive = not bool(official_stat.get("harmful", False))
+            else:
+                is_positive = bool(known.get("isPositive", _fallback_positive(key, minimum, maximum)))
+
+            display = str(official_stat.get("display") or "")
+            is_percentage = "%" in display if display else bool(known.get("isPercentage", False))
             stats.append({
                 "key": key,
                 "name": name,
                 "min": minimum,
                 "max": maximum,
-                "isPositive": bool(known.get("isPositive", _fallback_positive(key, minimum, maximum))),
-                "isPercentage": bool(known.get("isPercentage", False)),
+                "isPositive": is_positive,
+                "isPercentage": is_percentage,
                 "origin": "artefact",
             })
     return {
@@ -188,6 +214,8 @@ async def build_calculator_data():
                 fallback = await asyncio.to_thread(_fallback_artifact, item_id, official, stat_defs)
                 old = legacy.get(item_id) or {}
                 fallback["additionalStats"] = old.get("additionalStats") or []
+                if not fallback["stats"] and fallback["additionalStats"]:
+                    fallback["calculator_source"] = "current official item + rolled trait catalog"
                 artifacts.append(fallback)
             except Exception:
                 artifacts.append({
