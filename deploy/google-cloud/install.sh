@@ -24,6 +24,8 @@ if ! swapon --show | grep -q /swapfile; then
 fi
 
 id -u "$APP_USER" >/dev/null 2>&1 || useradd --system --create-home --shell /usr/sbin/nologin "$APP_USER"
+# Git 2.35+ refuses repositories owned by another account unless explicitly trusted.
+git config --global --add safe.directory "$APP_DIR" || true
 if [[ ! -d "$APP_DIR/.git" ]]; then
   git clone --branch "$BRANCH" --depth 1 "$REPO_URL" "$APP_DIR"
 else
