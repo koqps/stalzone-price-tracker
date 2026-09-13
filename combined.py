@@ -5,19 +5,43 @@ import logging
 import os
 import threading
 import time
+from pathlib import Path
 
 import uvicorn
+from fastapi.responses import HTMLResponse
 from scapi.config import Config
 
 Config.REALM = os.getenv("REALM", "global").lower()
 
 from dashboard.server import app
 from dashboard.opportunities import router as opportunities_router
+from dashboard.build_calculator import router as build_calculator_router
 import bot as bot_module
 from bot_catalog_commands import register_catalog_commands
 from patch_monitor import collect_official_patch_signals
 
 app.include_router(opportunities_router)
+app.include_router(build_calculator_router)
+
+_INDEX_PATH = Path(__file__).parent / "dashboard" / "static" / "index.html"
+
+
+@app.middleware("http")
+async def inject_build_calculator_tab(request, call_next):
+    """Keep the main dashboard static while exposing the calculator as a tab."""
+    if request.method == "GET" and request.url.path == "/":
+        html = _INDEX_PATH.read_text(encoding="utf-8")
+        tab = '<a class="build-tab-link" href="/build-calculator">🧪 Build Calculator</a>'
+        if tab not in html:
+            html = html.replace("</nav>", tab + "</nav>", 1)
+            html = html.replace(
+                "</style>",
+                ".nav .build-tab-link{color:var(--muted);border-radius:10px;padding:9px 14px;font-weight:800;font-size:12px;text-decoration:none}.nav .build-tab-link:hover{color:#fff;background:color-mix(in srgb,var(--accent) 18%,var(--panel2))}@media(max-width:700px){.nav .build-tab-link{flex:1;text-align:center;padding:9px 7px}}\n</style>",
+                1,
+            )
+        return HTMLResponse(html)
+    return await call_next(request)
+
 
 bot = bot_module.bot
 DISCORD_TOKEN = bot_module.DISCORD_TOKEN
