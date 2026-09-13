@@ -21,6 +21,12 @@ DISCORD_TOKEN = bot_module.DISCORD_TOKEN
 REGION = bot_module.REGION
 log = logging.getLogger("combined")
 
+# One host should own Discord + live ingestion. Other deployments can remain
+# online as dashboard-only fallbacks without duplicating scans or bot sessions.
+COLLECTOR_ENABLED = os.getenv("COLLECTOR_ENABLED", "true").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+
 # Correct quality colors everywhere, including the older bot.py embed paths.
 bot_module.QUALITY_COLORS = {
     0: 0x8B8F86,
@@ -80,8 +86,12 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s  %(levelname)-7s  %(name)s  %(message)s",
     )
-    threading.Thread(target=run_bot, daemon=True, name="discord-bot").start()
-    threading.Thread(target=run_patch_monitor, daemon=True, name="patch-monitor").start()
+    if COLLECTOR_ENABLED:
+        log.info("Collector enabled: starting Discord bot, ingestion, and patch monitor")
+        threading.Thread(target=run_bot, daemon=True, name="discord-bot").start()
+        threading.Thread(target=run_patch_monitor, daemon=True, name="patch-monitor").start()
+    else:
+        log.info("Collector disabled: dashboard-only mode")
     port = int(os.getenv("PORT", "8420"))
     uvicorn.run(app, host="0.0.0.0", port=port)
 
