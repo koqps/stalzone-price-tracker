@@ -39,6 +39,11 @@ async def inject_build_calculator_tab(request, call_next):
                 ".nav .build-tab-link{color:var(--muted);border-radius:10px;padding:9px 14px;font-weight:800;font-size:12px;text-decoration:none}.nav .build-tab-link:hover{color:#fff;background:color-mix(in srgb,var(--accent) 18%,var(--panel2))}@media(max-width:700px){.nav .build-tab-link{flex:1;text-align:center;padding:9px 7px}}\n</style>",
                 1,
             )
+            html = html.replace(
+                "</body>",
+                "<script>(()=>{const v=new URLSearchParams(location.search).get('view');if(v){const b=document.querySelector(`.nav button[data-view=\"${v}\"]`);if(b)setTimeout(()=>b.click(),0)}})();</script></body>",
+                1,
+            )
         return HTMLResponse(html)
     return await call_next(request)
 
