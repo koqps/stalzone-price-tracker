@@ -39,12 +39,12 @@ python3 -m venv "$APP_DIR/.venv"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "Enter the existing tracker secrets from Render. Values stay only on this VM."
-  echo "NOTE: DISCORD_TOKEN is temporarily visible while typing because Google browser SSH can block hidden-input prompts."
+  echo "NOTE: Google browser SSH can block hidden-input prompts, so values are visible while entering them."
   read -r -p "DISCORD_TOKEN: " DISCORD_TOKEN
   read -r -p "EXBO_CLIENT_ID: " EXBO_CLIENT_ID
-  read -r -s -p "EXBO_CLIENT_SECRET: " EXBO_CLIENT_SECRET; echo
+  read -r -p "EXBO_CLIENT_SECRET: " EXBO_CLIENT_SECRET
   read -r -p "SUPABASE_SYNC_URL: " SUPABASE_SYNC_URL
-  read -r -s -p "SUPABASE_TRACKER_SECRET: " SUPABASE_TRACKER_SECRET; echo
+  read -r -p "SUPABASE_TRACKER_SECRET: " SUPABASE_TRACKER_SECRET
   read -r -p "CHANNEL_ID (optional): " CHANNEL_ID
   read -r -p "TARGET_GUILD_IDS (optional): " TARGET_GUILD_IDS
   cat > "$ENV_FILE" <<EOF
