@@ -1,4 +1,8 @@
-"""SQLite working cache with persistent Supabase mirroring for market intelligence."""
+"""SQLite working cache with durable Supabase mirroring.
+
+Render's local filesystem is only a cache. Writes are mirrored to Supabase and
+recent durable history is hydrated back into SQLite after a restart.
+"""
 from __future__ import annotations
 
 import sqlite3
@@ -68,7 +72,13 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT,updated_at REAL
 """
 
 
-def bonus_bucket(bonus: float | None, step_pct: float = 2.5) -> int:
+def bonus_bucket(bonus: float | None, step_pct: float = 1.0) -> int:
+    """Bucket ordinary bonus fractions at 1% resolution.
+
+    Exact enhancement separation does NOT rely on this bucket; production
+    comparisons use the explicit ``upgrade_level`` column. The finer default
+    also preserves +N compatibility keys without merging neighboring levels.
+    """
     bonus_pct = max(0.0, float(bonus or 0.0)) * 100
     return int(round(bonus_pct / step_pct) * step_pct * 10)
 
@@ -82,10 +92,10 @@ class MarketDB:
         with self._conn() as conn:
             conn.executescript(SCHEMA)
             self._upgrade_legacy_schema(conn)
-            path_key = str(path.resolve())
-            if supabase_enabled() and path_key not in self._hydrated_paths:
+            key = str(path.resolve())
+            if supabase_enabled() and key not in self._hydrated_paths:
                 hydrate_sqlite(conn)
-                self._hydrated_paths.add(path_key)
+                self._hydrated_paths.add(key)
         mirror.start()
 
     def _upgrade_legacy_schema(self, conn: sqlite3.Connection) -> None:
@@ -107,11 +117,18 @@ class MarketDB:
         finally:
             conn.close()
 
+    def get_rows(self, sql: str, params: list | tuple = ()) -> list[sqlite3.Row]:
+        with self._conn() as conn:
+            return conn.execute(sql, params).fetchall()
+
     def _insert(self, table: str, fields: dict[str, Any], *, ignore: bool = False) -> None:
         cols = list(fields)
         verb = "INSERT OR IGNORE" if ignore else "INSERT"
         with self._conn() as conn:
-            conn.execute(f"{verb} INTO {table} ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})", [fields[c] for c in cols])
+            conn.execute(
+                f"{verb} INTO {table} ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
+                [fields[c] for c in cols],
+            )
         mirror.enqueue(table, fields)
 
     def record_snapshot(self, **fields: Any) -> None:
@@ -141,52 +158,85 @@ class MarketDB:
     def recent_sales(self, item_id: str, region: str, qlt: int, bonus_bucket_val: int, since: float, limit: int = 200, upgrade_level: int | None = None) -> list[sqlite3.Row]:
         with self._conn() as conn:
             if upgrade_level is None:
-                return conn.execute("SELECT * FROM sale_observation WHERE item_id=? AND region=? AND qlt=? AND bonus_bucket=? AND observed_at>=? ORDER BY observed_at DESC LIMIT ?", (item_id,region,qlt,bonus_bucket_val,since,limit)).fetchall()
-            return conn.execute("SELECT * FROM sale_observation WHERE item_id=? AND region=? AND qlt=? AND upgrade_level=? AND observed_at>=? ORDER BY observed_at DESC LIMIT ?", (item_id,region,qlt,upgrade_level,since,limit)).fetchall()
+                return conn.execute(
+                    "SELECT * FROM sale_observation WHERE item_id=? AND region=? AND qlt=? AND bonus_bucket=? AND observed_at>=? ORDER BY observed_at DESC LIMIT ?",
+                    (item_id,region,qlt,bonus_bucket_val,since,limit),
+                ).fetchall()
+            return conn.execute(
+                "SELECT * FROM sale_observation WHERE item_id=? AND region=? AND qlt=? AND upgrade_level=? AND observed_at>=? ORDER BY observed_at DESC LIMIT ?",
+                (item_id,region,qlt,upgrade_level,since,limit),
+            ).fetchall()
 
     def recent_community_signals(self, item_name: str, region: str, since: float, limit: int = 100) -> list[sqlite3.Row]:
         with self._conn() as conn:
-            return conn.execute("SELECT * FROM community_signal WHERE item_name=? AND region=? AND collected_at>=? ORDER BY collected_at DESC LIMIT ?", (item_name,region,since,limit)).fetchall()
+            return conn.execute(
+                "SELECT * FROM community_signal WHERE item_name=? AND region=? AND collected_at>=? ORDER BY collected_at DESC LIMIT ?",
+                (item_name,region,since,limit),
+            ).fetchall()
 
     def latest_snapshot(self, item_id: str, region: str, since: float) -> list[sqlite3.Row]:
         with self._conn() as conn:
-            return conn.execute("SELECT * FROM auction_snapshot WHERE item_id=? AND region=? AND observed_at>=? ORDER BY observed_at DESC", (item_id,region,since)).fetchall()
+            return conn.execute(
+                "SELECT * FROM auction_snapshot WHERE item_id=? AND region=? AND observed_at>=? ORDER BY observed_at DESC",
+                (item_id,region,since),
+            ).fetchall()
 
     def valuation_history(self, item_id: str, region: str, qlt: int, bonus_bucket_val: int, days: int = 30) -> list[sqlite3.Row]:
         since = time.time() - days * 86400
         with self._conn() as conn:
-            return conn.execute("SELECT * FROM valuation_report WHERE item_id=? AND region=? AND qlt=? AND bonus_bucket=? AND computed_at>=? ORDER BY computed_at ASC", (item_id,region,qlt,bonus_bucket_val,since)).fetchall()
+            return conn.execute(
+                "SELECT * FROM valuation_report WHERE item_id=? AND region=? AND qlt=? AND bonus_bucket=? AND computed_at>=? ORDER BY computed_at ASC",
+                (item_id,region,qlt,bonus_bucket_val,since),
+            ).fetchall()
 
     def latest_valuations(self, region: str, limit: int = 500) -> list[sqlite3.Row]:
         with self._conn() as conn:
-            return conn.execute("SELECT v.* FROM valuation_report v JOIN (SELECT item_id,qlt,upgrade_level,MAX(computed_at) mx FROM valuation_report WHERE region=? GROUP BY item_id,qlt,upgrade_level) x ON v.item_id=x.item_id AND v.qlt=x.qlt AND v.upgrade_level=x.upgrade_level AND v.computed_at=x.mx WHERE v.region=? ORDER BY v.computed_at DESC LIMIT ?", (region,region,limit)).fetchall()
+            return conn.execute(
+                "SELECT v.* FROM valuation_report v JOIN (SELECT item_id,qlt,upgrade_level,MAX(computed_at) mx FROM valuation_report WHERE region=? GROUP BY item_id,qlt,upgrade_level) x ON v.item_id=x.item_id AND v.qlt=x.qlt AND v.upgrade_level=x.upgrade_level AND v.computed_at=x.mx WHERE v.region=? ORDER BY v.computed_at DESC LIMIT ?",
+                (region,region,limit),
+            ).fetchall()
 
     def recent_alerts(self, region: str, days: int = 7, limit: int = 200) -> list[sqlite3.Row]:
         since = time.time() - days * 86400
         with self._conn() as conn:
-            return conn.execute("SELECT * FROM price_deviation_alert WHERE region=? AND created_at>=? ORDER BY created_at DESC LIMIT ?", (region,since,limit)).fetchall()
+            return conn.execute(
+                "SELECT * FROM price_deviation_alert WHERE region=? AND created_at>=? ORDER BY created_at DESC LIMIT ?",
+                (region,since,limit),
+            ).fetchall()
 
     def recent_patch_signals(self, days: int = 30, limit: int = 200) -> list[sqlite3.Row]:
         since = time.time() - days * 86400
         with self._conn() as conn:
-            return conn.execute("SELECT * FROM patch_signal WHERE published_at>=? ORDER BY published_at DESC LIMIT ?", (since,limit)).fetchall()
+            return conn.execute(
+                "SELECT * FROM patch_signal WHERE published_at>=? ORDER BY published_at DESC LIMIT ?",
+                (since,limit),
+            ).fetchall()
 
     def manual_price(self, item_id: str, region: str, qlt: int, bonus: float, upgrade_level: int = -1) -> sqlite3.Row | None:
         with self._conn() as conn:
-            return conn.execute("SELECT * FROM manual_prices WHERE item_id=? AND region=? AND qlt=? AND upgrade_level IN (?, -1) AND bonus_min<=? AND bonus_max>=? AND (expires_at IS NULL OR expires_at>?) ORDER BY upgrade_level DESC,updated_at DESC LIMIT 1", (item_id,region,qlt,upgrade_level,bonus,bonus,time.time())).fetchone()
+            return conn.execute(
+                "SELECT * FROM manual_prices WHERE item_id=? AND region=? AND qlt=? AND upgrade_level IN (?, -1) AND bonus_min<=? AND bonus_max>=? AND (expires_at IS NULL OR expires_at>?) ORDER BY upgrade_level DESC,updated_at DESC LIMIT 1",
+                (item_id,region,qlt,upgrade_level,bonus,bonus,time.time()),
+            ).fetchone()
 
     def set_manual_price(self, **fields: Any) -> None:
         fields.setdefault("upgrade_level", -1); fields.setdefault("updated_at", time.time())
         cols = list(fields)
         updates = ",".join(f"{k}=excluded.{k}" for k in cols)
         with self._conn() as conn:
-            conn.execute(f"INSERT INTO manual_prices ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)}) ON CONFLICT(item_id,region,qlt,upgrade_level,bonus_min,bonus_max) DO UPDATE SET {updates}", [fields[c] for c in cols])
+            conn.execute(
+                f"INSERT INTO manual_prices ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)}) ON CONFLICT(item_id,region,qlt,upgrade_level,bonus_min,bonus_max) DO UPDATE SET {updates}",
+                [fields[c] for c in cols],
+            )
         mirror.enqueue("manual_prices", fields)
 
     def set_meta(self, key: str, value: str) -> None:
         row = {"key":key,"value":value,"updated_at":time.time()}
         with self._conn() as conn:
-            conn.execute("INSERT INTO meta(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", (row["key"],row["value"],row["updated_at"]))
+            conn.execute(
+                "INSERT INTO meta(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                (row["key"],row["value"],row["updated_at"]),
+            )
         mirror.enqueue("meta", row)
 
     def get_meta(self, key: str, default: str = "") -> str:
