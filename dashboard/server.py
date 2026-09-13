@@ -1,194 +1,169 @@
-"""
-server.py — FastAPI backend for the StalZone price-tracker dashboard.
+"""FastAPI backend for the NA STALZONE artifact market dashboard.
 
-Serves valuation reports, historical price trends, community signals,
-and deviation alerts from the MarketDB SQLite store. Includes a
-`/api/seed` endpoint that injects realistic demo data so the dashboard
-renders meaningfully on first launch before the bot's scan loop has
-populated real observations.
+The dashboard distinguishes observed official market measurements from model
+estimates. Artifact metadata (images, classes and stat ranges) is sourced from
+EXBO-Studio/stalzone-database.
 """
-
 from __future__ import annotations
 
-import random
+import os
+import statistics
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
-from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from market_db import MarketDB, bonus_bucket
+from artifact_catalog import QUALITY_NAMES, get_artifact_metadata, load_artifact_catalog
+from market_db import MarketDB
 
 app = FastAPI(title="StalZone Price Tracker")
 db = MarketDB()
 
-# ---------------------------------------------------------------------
-# Sample data seeding (for demo / first-launch)
-# ---------------------------------------------------------------------
-SAMPLE_ITEMS = [
-    {"item_id": "firebird", "item_name": "Firebird", "qlt": 3, "base": 850_000, "vol": 0.12},
-    {"item_id": "timber_uc", "item_name": "Timber", "qlt": 1, "base": 520_000, "vol": 0.08},
-    {"item_id": "polyhedron", "item_name": "Polyhedron", "qlt": 4, "base": 3_200_000, "vol": 0.18},
-    {"item_id": "shrimp_r", "item_name": "Shrimp", "qlt": 3, "base": 680_000, "vol": 0.10},
-    {"item_id": "shell_com", "item_name": "Shell", "qlt": 0, "base": 95_000, "vol": 0.06},
-    {"item_id": "compass_exc", "item_name": "Compass", "qlt": 4, "base": 2_800_000, "vol": 0.15},
-    {"item_id": "junk_sp", "item_name": "Junk", "qlt": 2, "base": 310_000, "vol": 0.09},
-    {"item_id": "drift_leg", "item_name": "Drift", "qlt": 5, "base": 8_500_000, "vol": 0.22},
-    {"item_id": "crystal_r", "item_name": "Crystal", "qlt": 3, "base": 720_000, "vol": 0.11},
-    {"item_id": "wrench_uc", "item_name": "Wrench", "qlt": 1, "base": 440_000, "vol": 0.07},
-]
-SAMPLE_COMMUNITY = [
-    {"item_name": "Firebird", "source": "reddit", "source_name": "r/Stalcraft",
-     "sentiment": "bullish", "sentiment_score": 0.4, "claimed_price": 920_000,
-     "url": "https://reddit.com/r/Stalcraft", "excerpt": "Firebird prices climbing after patch"},
-    {"item_name": "Timber", "source": "discord_trade", "source_name": "NA Trade #1",
-     "sentiment": "bearish", "sentiment_score": -0.3, "claimed_price": 480_000,
-     "url": "https://discord.gg/stalcraft-eng", "excerpt": "Timber oversupplied, dropping fast"},
-    {"item_name": "Polyhedron", "source": "staldata", "source_name": "staldata.org",
-     "sentiment": "bullish", "sentiment_score": 0.25, "claimed_price": 3_500_000,
-     "url": "https://staldata.org", "excerpt": "Median up 8% week-over-week"},
-    {"item_name": "Shrimp", "source": "youtube", "source_name": "StalkerPriceGuides",
-     "sentiment": "neutral", "sentiment_score": 0.05, "claimed_price": None,
-     "url": "https://youtube.com/watch?v=demo", "excerpt": "Shrimp market overview — stable demand"},
-    {"item_name": "Drift", "source": "reddit", "source_name": "r/Stalcraft",
-     "sentiment": "bullish", "sentiment_score": 0.6, "claimed_price": 9_200_000,
-     "url": "https://reddit.com/r/Stalcraft", "excerpt": "Legendary Drift is BiS now, huge demand"},
-    {"item_name": "Compass", "source": "forum", "source_name": "EXBO Forum",
-     "sentiment": "bearish", "sentiment_score": -0.2, "claimed_price": 2_400_000,
-     "url": "https://forum-stalcraft.net", "excerpt": "Compass nerf incoming, prices softening"},
-]
+QUALITY_COLORS = {
+    0: "#8b8f86",
+    1: "#79b84b",
+    2: "#4f98d1",
+    3: "#9a63d8",
+    4: "#e6a33c",
+    5: "#e05252",
+}
 
 
-def seed_sample_data() -> None:
-    """Inject 30 days of realistic valuation history + community signals + alerts."""
-    now = time.time()
-    rng = random.Random(42)
+def _median(values: list[float]) -> float | None:
+    values = [float(v) for v in values if v is not None and float(v) > 0]
+    return round(statistics.median(values), 2) if values else None
 
-    # Clear old sample rows (keep manual_prices)
-    with db._conn() as conn:
-        for t in ("auction_snapshot", "sale_observation", "community_signal",
-                  "valuation_report", "price_deviation_alert"):
-            conn.execute(f"DELETE FROM {t}")
 
-    for item in SAMPLE_ITEMS:
-        item_id = item["item_id"]
-        name = item["item_name"]
-        qlt = item["qlt"]
-        base = item["base"]
-        vol = item["vol"]
-        bucket = bonus_bucket(0.0)
+def _mean(values: list[float]) -> float | None:
+    values = [float(v) for v in values if v is not None and float(v) > 0]
+    return round(statistics.fmean(values), 2) if values else None
 
-        # 30 days of valuation history with a gentle trend + noise
-        trend = rng.uniform(-0.15, 0.25)  # overall drift over the month
-        prev_fair = base
-        for day in range(30, -1, -1):
-            ts = now - day * 86400
-            daily_move = rng.gauss(0, vol / 3)
-            seasonal = 0.05 * math.sin(day / 4.0)  # weekly oscillation
-            fair = base * (1 + trend * (30 - day) / 30 + daily_move + seasonal)
-            fair = max(base * 0.5, fair)
-            floor_v = fair * 0.92
-            quick = fair * 0.97
-            stretch = fair * 1.10
-            conf = max(30, min(95, int(70 + rng.gauss(0, 12) +
-                                       (10 if day < 14 else -5))))
-            live_n = rng.randint(2, 9)
-            conf_sales = rng.randint(3, 18)
-            inf_sales = rng.randint(5, 30)
-            comm_n = rng.randint(0, 6)
-            comm_bias = rng.uniform(-0.4, 0.4)
 
-            db.record_valuation(
-                item_id=item_id, item_name=name, region="na", qlt=qlt,
-                bonus_bucket=bucket, floor_price=round(floor_v, 2),
-                quick_sale_price=round(quick, 2),
-                fair_value_price=round(fair, 2),
-                stretch_price=round(stretch, 2), confidence=conf,
-                live_comparables=live_n, confirmed_sales=conf_sales,
-                inferred_sales=inf_sales, community_signals=comm_n,
-                community_bias=round(comm_bias, 3),
-                evidence_summary=f"per-tier n={conf_sales+inf_sales}; live n={live_n}",
-                computed_at=ts,
-            )
-            # also seed some sale observations
-            for _ in range(rng.randint(1, 4)):
-                db.record_sale(
-                    item_id=item_id, item_name=name, region="na", qlt=qlt,
-                    bonus_bucket=bucket,
-                    unit_price=round(fair * rng.uniform(0.85, 1.15), 2),
-                    amount=1,
-                    source=rng.choice(["confirmed_bid_sale", "inferred_buyout_sale", "official_history"]),
-                    confidence=rng.choice([1.0, 0.6, 0.35]),
-                    observed_at=ts + rng.uniform(0, 86400),
-                )
-            prev_fair = fair
-
-        # Seed a few auction snapshots for the most recent day
-        for _ in range(rng.randint(3, 8)):
-            db.record_snapshot(
-                item_id=item_id, item_name=name, region="na", qlt=qlt,
-                bonus=0.0, bonus_bucket=bucket, amount=1,
-                buyout_price=round(base * rng.uniform(0.8, 1.2), 2),
-                unit_price=round(base * rng.uniform(0.8, 1.2), 2),
-                lot_key=f"{item_id}_{rng.randint(1000,9999)}",
-                observed_at=now - rng.uniform(0, 86400),
-            )
-
-    # Community signals (last 7 days)
-    for sig in SAMPLE_COMMUNITY:
-        for day in range(7, 0, -1):
-            if rng.random() < 0.4:
-                db.record_community_signal(
-                    item_name=sig["item_name"], region="na",
-                    claimed_price=sig["claimed_price"],
-                    sentiment=sig["sentiment"],
-                    sentiment_score=sig["sentiment_score"] + rng.gauss(0, 0.1),
-                    source=sig["source"], source_name=sig["source_name"],
-                    url=sig["url"], excerpt=sig["excerpt"],
-                    confidence=0.15 if sig["source"] != "staldata" else 0.20,
-                    collected_at=now - day * 86400 + rng.uniform(0, 86400),
-                )
-
-    # Seed a few deviation alerts
-    alert_templates = [
-        ("volatility_spike", "critical", "Firebird", 3,
-         "Firebird fair value moved up 24.3% (850,000 -> 1,057,000 RUB)."),
-        ("history_vs_live_gap", "high", "Timber", 1,
-         "Timber historical sales (520,000 RUB) are 48% above the cheapest live comparable (350,000 RUB). Estimate may be stale."),
-        ("community_vs_market_gap", "watch", "Drift", 5,
-         "Legendary Drift community claim (9,200,000 RUB via reddit) is 62% off market fair value (5,670,000 RUB)."),
-        ("snipe_opportunity", "high", "Compass", 4,
-         "Compass listing at 1,900,000 RUB is 32% below fair value (2,800,000 RUB). Potential snipe."),
+@app.get("/api/quality-tiers")
+def api_quality_tiers() -> list[dict]:
+    """All auction quality tiers, including Legendary (qlt=5)."""
+    return [
+        {"qlt": qlt, "name": name, "color": QUALITY_COLORS[qlt]}
+        for qlt, name in QUALITY_NAMES.items()
     ]
-    for atype, sev, name, qlt, msg in alert_templates:
-        db.record_alert(
-            item_id=name.lower().replace(" ", "_"), item_name=name,
-            region="na", qlt=qlt, bonus_bucket=0, alert_type=atype,
-            baseline_price=2_800_000, observed_price=1_900_000,
-            deviation_pct=32.0, severity=sev, message=msg,
-            created_at=now - rng.uniform(0, 86400 * 3),
-        )
 
 
-import math  # noqa: E402  (used by seed_sample_data)
+@app.get("/api/market")
+def api_market(region: str = "na", live_minutes: int = 20, sale_days: int = 7) -> list[dict]:
+    """Return observed market facts grouped by artifact and quality tier.
+
+    live_* fields come directly from recently observed official auction lots.
+    sale_* fields come directly from official completed-sale history. Model
+    estimates are returned separately and clearly named model_*.
+    """
+    now = time.time()
+    live_since = now - max(5, live_minutes) * 60
+    sale_since = now - max(1, sale_days) * 86400
+
+    with db._conn() as conn:
+        snapshots = conn.execute(
+            "SELECT item_id,item_name,qlt,unit_price,observed_at FROM auction_snapshot "
+            "WHERE region=? AND observed_at>=? AND unit_price>0",
+            (region, live_since),
+        ).fetchall()
+        sales = conn.execute(
+            "SELECT item_id,item_name,qlt,unit_price,observed_at FROM sale_observation "
+            "WHERE region=? AND observed_at>=? AND unit_price>0 AND source='official_history'",
+            (region, sale_since),
+        ).fetchall()
+        valuations = conn.execute(
+            "SELECT v.* FROM valuation_report v JOIN ("
+            " SELECT item_id,qlt,bonus_bucket,MAX(computed_at) mx FROM valuation_report "
+            " WHERE region=? GROUP BY item_id,qlt,bonus_bucket"
+            ") x ON v.item_id=x.item_id AND v.qlt=x.qlt "
+            "AND v.bonus_bucket=x.bonus_bucket AND v.computed_at=x.mx "
+            "WHERE v.region=?",
+            (region, region),
+        ).fetchall()
+
+    grouped: dict[tuple[str, int], dict] = {}
+
+    def ensure(item_id: str, item_name: str, qlt: int) -> dict:
+        key = (item_id, int(qlt))
+        if key not in grouped:
+            grouped[key] = {
+                "item_id": item_id,
+                "item_name": item_name or item_id,
+                "qlt": int(qlt),
+                "qlt_name": QUALITY_NAMES.get(int(qlt), f"Q{qlt}"),
+                "tier_color": QUALITY_COLORS.get(int(qlt), "#8b8f86"),
+                "_live": [],
+                "_sales": [],
+                "latest_observation": 0.0,
+                "latest_sale": 0.0,
+            }
+        return grouped[key]
+
+    for r in snapshots:
+        g = ensure(r["item_id"], r["item_name"], r["qlt"])
+        g["_live"].append(r["unit_price"])
+        g["latest_observation"] = max(g["latest_observation"], r["observed_at"] or 0)
+
+    for r in sales:
+        g = ensure(r["item_id"], r["item_name"], r["qlt"])
+        g["_sales"].append(r["unit_price"])
+        g["latest_sale"] = max(g["latest_sale"], r["observed_at"] or 0)
+
+    # Keep model-only rows visible, but never present them as observed prices.
+    for v in valuations:
+        g = ensure(v["item_id"], v["item_name"], v["qlt"])
+        current = g.get("_valuation")
+        if current is None or (v["confidence"] or 0) > (current["confidence"] or 0):
+            g["_valuation"] = v
+
+    result: list[dict] = []
+    for g in grouped.values():
+        live = g.pop("_live")
+        sales7 = g.pop("_sales")
+        valuation = g.pop("_valuation", None)
+        row = {
+            **g,
+            "live_floor": round(min(live), 2) if live else None,
+            "live_median": _median(live),
+            "live_listings": len(live),
+            "sale_median": _median(sales7),
+            "sale_average": _mean(sales7),
+            "sale_count": len(sales7),
+            "model_fair_value": valuation["fair_value_price"] if valuation else None,
+            "model_quick_sale": valuation["quick_sale_price"] if valuation else None,
+            "model_stretch": valuation["stretch_price"] if valuation else None,
+            "model_confidence": valuation["confidence"] if valuation else None,
+            "price_source": "official_na_auction",
+        }
+        result.append(row)
+
+    result.sort(key=lambda r: (r["item_name"].lower(), r["qlt"]))
+    return result
 
 
-# ---------------------------------------------------------------------
-# API routes
-# ---------------------------------------------------------------------
-@app.api_route("/api/seed", methods=["GET", "POST"])
-def api_seed() -> dict:
-    seed_sample_data()
-    return {"ok": True, "message": "Sample data seeded"}
+@app.get("/api/artifacts")
+async def api_artifacts() -> list[dict]:
+    catalog = await load_artifact_catalog()
+    return sorted(catalog.values(), key=lambda x: x["item_name"].lower())
+
+
+@app.get("/api/artifacts/{item_id}")
+async def api_artifact(item_id: str) -> dict:
+    item = await get_artifact_metadata(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    return item
 
 
 @app.get("/api/valuations")
 def api_valuations(region: str = "na") -> list[dict]:
+    """Legacy model-estimate endpoint kept for chart/history compatibility."""
     return [dict(r) for r in db.latest_valuations(region)]
 
 
@@ -204,8 +179,7 @@ def api_community(region: str = "na", days: int = 7) -> list[dict]:
     with db._conn() as conn:
         rows = conn.execute(
             "SELECT * FROM community_signal WHERE region=? AND collected_at>=? "
-            "ORDER BY collected_at DESC LIMIT 200",
-            (region, since),
+            "ORDER BY collected_at DESC LIMIT 200", (region, since),
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -218,48 +192,53 @@ def api_alerts(region: str = "na", days: int = 7) -> list[dict]:
 @app.get("/api/summary")
 def api_summary(region: str = "na") -> dict:
     with db._conn() as conn:
+        snap_count = conn.execute(
+            "SELECT COUNT(*) FROM auction_snapshot WHERE region=?", (region,)
+        ).fetchone()[0]
+        sale_count = conn.execute(
+            "SELECT COUNT(*) FROM sale_observation WHERE region=? AND source='official_history'", (region,)
+        ).fetchone()[0]
         total_items = conn.execute(
-            "SELECT COUNT(DISTINCT item_id) FROM valuation_report WHERE region=?",
-            (region,)).fetchone()[0]
+            "SELECT COUNT(DISTINCT item_id) FROM ("
+            " SELECT item_id FROM auction_snapshot WHERE region=? UNION "
+            " SELECT item_id FROM sale_observation WHERE region=? AND source='official_history'"
+            ")", (region, region),
+        ).fetchone()[0]
         total_alerts = conn.execute(
             "SELECT COUNT(*) FROM price_deviation_alert WHERE region=? AND created_at>=?",
-            (region, time.time() - 7 * 86400)).fetchone()[0]
-        critical = conn.execute(
-            "SELECT COUNT(*) FROM price_deviation_alert WHERE region=? AND severity='critical' "
-            "AND created_at>=?", (region, time.time() - 7 * 86400)).fetchone()[0]
+            (region, time.time() - 7 * 86400),
+        ).fetchone()[0]
         avg_conf = conn.execute(
-            "SELECT AVG(confidence) FROM valuation_report WHERE region=? "
-            "AND computed_at>=?", (region, time.time() - 2 * 86400)).fetchone()[0] or 0
-        total_signals = conn.execute(
-            "SELECT COUNT(*) FROM community_signal WHERE region=? AND collected_at>=?",
-            (region, time.time() - 7 * 86400)).fetchone()[0]
-        # Quality tier breakdown
+            "SELECT AVG(confidence) FROM valuation_report WHERE region=? AND computed_at>=?",
+            (region, time.time() - 2 * 86400),
+        ).fetchone()[0] or 0
         tier_rows = conn.execute(
-            "SELECT qlt, COUNT(DISTINCT item_id) as cnt FROM valuation_report "
-            "WHERE region=? GROUP BY qlt ORDER BY qlt", (region,)).fetchall()
-        tier_breakdown = {str(r["qlt"]): r["cnt"] for r in tier_rows}
-        # Snapshot and sale counts
-        snap_count = conn.execute(
-            "SELECT COUNT(*) FROM auction_snapshot WHERE region=?", (region,)).fetchone()[0]
-        sale_count = conn.execute(
-            "SELECT COUNT(*) FROM sale_observation WHERE region=?", (region,)).fetchone()[0]
+            "SELECT qlt,COUNT(DISTINCT item_id) cnt FROM ("
+            " SELECT item_id,qlt FROM auction_snapshot WHERE region=? UNION "
+            " SELECT item_id,qlt FROM sale_observation WHERE region=? AND source='official_history'"
+            ") GROUP BY qlt ORDER BY qlt", (region, region),
+        ).fetchall()
+
     return {
         "total_items": total_items,
         "total_alerts": total_alerts,
-        "critical_alerts": critical,
         "avg_confidence": round(avg_conf, 1),
-        "community_signals": total_signals,
-        "tier_breakdown": tier_breakdown,
+        "tier_breakdown": {str(r["qlt"]): r["cnt"] for r in tier_rows},
         "snapshots": snap_count,
         "sales": sale_count,
-        "data_source": "live" if db.get_meta("live_data_ingested") == "true" else "sample",
+        "data_source": "official_na_live" if db.get_meta("live_data_ingested") == "true" else "waiting",
         "last_ingestion": db.get_meta("last_ingestion", ""),
     }
 
 
-# ---------------------------------------------------------------------
-# Static frontend
-# ---------------------------------------------------------------------
+@app.api_route("/api/seed", methods=["GET", "POST"])
+def api_seed() -> dict:
+    """Production safety: never replace live observations with invented demo data."""
+    if os.getenv("ALLOW_SAMPLE_SEED", "false").lower() != "true":
+        raise HTTPException(status_code=403, detail="Sample seeding is disabled")
+    raise HTTPException(status_code=410, detail="Sample seeding was removed from the live tracker")
+
+
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -269,6 +248,11 @@ def index() -> FileResponse:
     return FileResponse(str(STATIC_DIR / "index.html"))
 
 
+@app.get("/app.js")
+def legacy_app_js() -> FileResponse:
+    return FileResponse(str(STATIC_DIR / "app.js"), media_type="application/javascript")
+
+
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True}
+    return {"ok": True, "source": "official_na_auction"}
