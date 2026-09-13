@@ -1,8 +1,7 @@
 """FastAPI backend for the NA STALZONE artifact market dashboard.
 
-The dashboard distinguishes observed official market measurements from model
-estimates. Artifact metadata (images, classes and stat ranges) is sourced from
-EXBO-Studio/stalzone-database.
+Observed prices come from the official NA auction API. Predictions are derived
+from those observations and are kept separate from raw market facts.
 """
 from __future__ import annotations
 
@@ -10,7 +9,6 @@ import os
 import statistics
 import sys
 import time
-from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -25,29 +23,102 @@ from market_db import MarketDB
 app = FastAPI(title="StalZone Price Tracker")
 db = MarketDB()
 
+# Exclusive and Legendary intentionally use the corrected color order.
 QUALITY_COLORS = {
     0: "#8b8f86",
     1: "#79b84b",
     2: "#4f98d1",
     3: "#9a63d8",
-    4: "#e6a33c",
-    5: "#e05252",
+    4: "#e05252",  # Exclusive
+    5: "#e6a33c",  # Legendary
 }
 
 
 def _median(values: list[float]) -> float | None:
-    values = [float(v) for v in values if v is not None and float(v) > 0]
-    return round(statistics.median(values), 2) if values else None
+    vals = [float(v) for v in values if v is not None and float(v) > 0]
+    return round(statistics.median(vals), 2) if vals else None
 
 
 def _mean(values: list[float]) -> float | None:
-    values = [float(v) for v in values if v is not None and float(v) > 0]
-    return round(statistics.fmean(values), 2) if values else None
+    vals = [float(v) for v in values if v is not None and float(v) > 0]
+    return round(statistics.fmean(vals), 2) if vals else None
+
+
+def _sell_targets(
+    live_floor: float | None,
+    live_median: float | None,
+    live_listings: int,
+    sale_median: float | None,
+    sale_count: int,
+    model_fair: float | None,
+    model_stretch: float | None,
+) -> dict:
+    """Build evidence-based listing targets without presenting them as guarantees.
+
+    Quick sale favors the cheapest current market evidence. Recommended uses the
+    median of observed anchors. Higher-margin intentionally requires stronger
+    evidence so sparse markets do not produce an invented aggressive target.
+    """
+    observed = [x for x in (live_floor, live_median, sale_median) if x and x > 0]
+    if not observed:
+        return {
+            "sell_quick": None,
+            "sell_recommended": None,
+            "sell_high_margin": None,
+            "sell_confidence": "none",
+            "sell_evidence": "No observed NA price evidence in the current window.",
+        }
+
+    if live_floor and sale_median:
+        quick = min(live_floor * 0.99, sale_median * 0.97)
+    elif live_floor:
+        quick = live_floor * 0.99
+    else:
+        quick = sale_median * 0.95
+
+    recommended = statistics.median(observed)
+    recommended = max(quick, recommended)
+
+    if sale_count >= 5 and (live_listings >= 2 or sale_count >= 15):
+        candidates = [recommended * 1.06]
+        if sale_median:
+            candidates.append(sale_median * 1.08)
+        if live_median:
+            candidates.append(live_median * 1.05)
+        high_margin = max(candidates)
+        # A model ceiling may limit an aggressive listing, but never creates one.
+        if model_stretch and model_stretch > 0:
+            high_margin = min(high_margin, model_stretch)
+        high_margin = max(recommended, high_margin)
+    else:
+        high_margin = None
+
+    if sale_count >= 20 and live_listings >= 3:
+        confidence = "high"
+    elif sale_count >= 5 or live_listings >= 3:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    evidence_bits = []
+    if live_listings:
+        evidence_bits.append(f"{live_listings} current live listings")
+    if sale_count:
+        evidence_bits.append(f"{sale_count} official sales in 7d")
+    if model_fair:
+        evidence_bits.append("model used only as a secondary reference")
+
+    return {
+        "sell_quick": round(quick, 2),
+        "sell_recommended": round(recommended, 2),
+        "sell_high_margin": round(high_margin, 2) if high_margin else None,
+        "sell_confidence": confidence,
+        "sell_evidence": "; ".join(evidence_bits) or "Observed NA market data",
+    }
 
 
 @app.get("/api/quality-tiers")
 def api_quality_tiers() -> list[dict]:
-    """All auction quality tiers, including Legendary (qlt=5)."""
     return [
         {"qlt": qlt, "name": name, "color": QUALITY_COLORS[qlt]}
         for qlt, name in QUALITY_NAMES.items()
@@ -56,12 +127,7 @@ def api_quality_tiers() -> list[dict]:
 
 @app.get("/api/market")
 def api_market(region: str = "na", live_minutes: int = 20, sale_days: int = 7) -> list[dict]:
-    """Return observed market facts grouped by artifact and quality tier.
-
-    live_* fields come directly from recently observed official auction lots.
-    sale_* fields come directly from official completed-sale history. Model
-    estimates are returned separately and clearly named model_*.
-    """
+    """Observed market facts plus clearly labeled evidence-based sell targets."""
     now = time.time()
     live_since = now - max(5, live_minutes) * 60
     sale_since = now - max(1, sale_days) * 86400
@@ -115,7 +181,6 @@ def api_market(region: str = "na", live_minutes: int = 20, sale_days: int = 7) -
         g["_sales"].append(r["unit_price"])
         g["latest_sale"] = max(g["latest_sale"], r["observed_at"] or 0)
 
-    # Keep model-only rows visible, but never present them as observed prices.
     for v in valuations:
         g = ensure(v["item_id"], v["item_name"], v["qlt"])
         current = g.get("_valuation")
@@ -127,19 +192,29 @@ def api_market(region: str = "na", live_minutes: int = 20, sale_days: int = 7) -
         live = g.pop("_live")
         sales7 = g.pop("_sales")
         valuation = g.pop("_valuation", None)
+        live_floor = round(min(live), 2) if live else None
+        live_median = _median(live)
+        sale_median = _median(sales7)
+        model_fair = valuation["fair_value_price"] if valuation else None
+        model_stretch = valuation["stretch_price"] if valuation else None
+        targets = _sell_targets(
+            live_floor, live_median, len(live), sale_median, len(sales7),
+            model_fair, model_stretch,
+        )
         row = {
             **g,
-            "live_floor": round(min(live), 2) if live else None,
-            "live_median": _median(live),
+            "live_floor": live_floor,
+            "live_median": live_median,
             "live_listings": len(live),
-            "sale_median": _median(sales7),
+            "sale_median": sale_median,
             "sale_average": _mean(sales7),
             "sale_count": len(sales7),
-            "model_fair_value": valuation["fair_value_price"] if valuation else None,
+            "model_fair_value": model_fair,
             "model_quick_sale": valuation["quick_sale_price"] if valuation else None,
-            "model_stretch": valuation["stretch_price"] if valuation else None,
+            "model_stretch": model_stretch,
             "model_confidence": valuation["confidence"] if valuation else None,
             "price_source": "official_na_auction",
+            **targets,
         }
         result.append(row)
 
@@ -163,7 +238,6 @@ async def api_artifact(item_id: str) -> dict:
 
 @app.get("/api/valuations")
 def api_valuations(region: str = "na") -> list[dict]:
-    """Legacy model-estimate endpoint kept for chart/history compatibility."""
     return [dict(r) for r in db.latest_valuations(region)]
 
 
@@ -204,14 +278,6 @@ def api_summary(region: str = "na") -> dict:
             " SELECT item_id FROM sale_observation WHERE region=? AND source='official_history'"
             ")", (region, region),
         ).fetchone()[0]
-        total_alerts = conn.execute(
-            "SELECT COUNT(*) FROM price_deviation_alert WHERE region=? AND created_at>=?",
-            (region, time.time() - 7 * 86400),
-        ).fetchone()[0]
-        avg_conf = conn.execute(
-            "SELECT AVG(confidence) FROM valuation_report WHERE region=? AND computed_at>=?",
-            (region, time.time() - 2 * 86400),
-        ).fetchone()[0] or 0
         tier_rows = conn.execute(
             "SELECT qlt,COUNT(DISTINCT item_id) cnt FROM ("
             " SELECT item_id,qlt FROM auction_snapshot WHERE region=? UNION "
@@ -221,8 +287,6 @@ def api_summary(region: str = "na") -> dict:
 
     return {
         "total_items": total_items,
-        "total_alerts": total_alerts,
-        "avg_confidence": round(avg_conf, 1),
         "tier_breakdown": {str(r["qlt"]): r["cnt"] for r in tier_rows},
         "snapshots": snap_count,
         "sales": sale_count,
@@ -233,7 +297,6 @@ def api_summary(region: str = "na") -> dict:
 
 @app.api_route("/api/seed", methods=["GET", "POST"])
 def api_seed() -> dict:
-    """Production safety: never replace live observations with invented demo data."""
     if os.getenv("ALLOW_SAMPLE_SEED", "false").lower() != "true":
         raise HTTPException(status_code=403, detail="Sample seeding is disabled")
     raise HTTPException(status_code=410, detail="Sample seeding was removed from the live tracker")
