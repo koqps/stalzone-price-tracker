@@ -2,6 +2,7 @@
 
 STALZONE artifact prices are comparable only within the same artifact, rarity,
 and explicit enhancement level. +0, +1, ... +15 are all separate markets.
+The official auction API represents this enhancement level as ``additional.ptn``.
 Unknown enhancement levels are excluded rather than guessed.
 """
 from __future__ import annotations
@@ -21,15 +22,20 @@ def extract_quality(additional: dict[str, Any] | None) -> int | None:
 
 
 def extract_upgrade_level(additional: dict[str, Any] | None) -> int | None:
-    """Return the explicit artifact enhancement level (0..15).
+    """Return the official artifact enhancement/potential level (0..15).
 
-    A missing level with no upgrade bonus is safely treated as +0. If the API
-    supplies non-zero enhancement data but omits the explicit level, return None
-    so that row cannot contaminate a different enhancement market.
+    Official auction payloads use ``ptn``. ``upgrade_level`` and ``potential``
+    are accepted only as compatibility aliases for alternate wrappers.
+    Missing level is +0 only when there is no contradictory enhancement data.
     """
     if not additional or not isinstance(additional, dict):
         return None
-    raw = additional.get("upgrade_level")
+
+    raw = additional.get("ptn")
+    if raw is None:
+        raw = additional.get("upgrade_level")
+    if raw is None:
+        raw = additional.get("potential")
     if isinstance(raw, dict):
         raw = raw.get("value", raw.get("level", raw.get("amount")))
     if raw is not None:
@@ -38,6 +44,9 @@ def extract_upgrade_level(additional: dict[str, Any] | None) -> int | None:
         except (TypeError, ValueError):
             return None
         return level if 0 <= level <= 15 else None
+
+    # The official API omits ptn for +0 on some records. Only infer +0 when no
+    # non-zero enhancement indicator is present; otherwise exclude the row.
     bonus = additional.get("upgrade_bonus")
     if isinstance(bonus, dict):
         bonus = bonus.get("value", bonus.get("amount"))
