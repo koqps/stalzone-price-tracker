@@ -2,6 +2,9 @@
 
 Observed prices come from the official NA auction API. Predictions are derived
 from those observations and are kept separate from raw market facts.
+
+Market rows are keyed by artifact + rarity + explicit enhancement level. A +15
+artifact is never mixed with +0/+10 evidence.
 """
 from __future__ import annotations
 
@@ -19,11 +22,11 @@ from fastapi.staticfiles import StaticFiles
 
 from artifact_catalog import QUALITY_NAMES, get_artifact_metadata, load_artifact_catalog
 from market_db import MarketDB
+from market_variants import bucket_to_upgrade_level, upgrade_label
 
 app = FastAPI(title="StalZone Price Tracker")
 db = MarketDB()
 
-# Exclusive and Legendary intentionally use the corrected color order.
 QUALITY_COLORS = {
     0: "#8b8f86",
     1: "#79b84b",
@@ -53,12 +56,6 @@ def _sell_targets(
     model_fair: float | None,
     model_stretch: float | None,
 ) -> dict:
-    """Build evidence-based listing targets without presenting them as guarantees.
-
-    Quick sale favors the cheapest current market evidence. Recommended uses the
-    median of observed anchors. Higher-margin intentionally requires stronger
-    evidence so sparse markets do not produce an invented aggressive target.
-    """
     observed = [x for x in (live_floor, live_median, sale_median) if x and x > 0]
     if not observed:
         return {
@@ -76,8 +73,7 @@ def _sell_targets(
     else:
         quick = sale_median * 0.95
 
-    recommended = statistics.median(observed)
-    recommended = max(quick, recommended)
+    recommended = max(quick, statistics.median(observed))
 
     if sale_count >= 5 and (live_listings >= 2 or sale_count >= 15):
         candidates = [recommended * 1.06]
@@ -86,7 +82,6 @@ def _sell_targets(
         if live_median:
             candidates.append(live_median * 1.05)
         high_margin = max(candidates)
-        # A model ceiling may limit an aggressive listing, but never creates one.
         if model_stretch and model_stretch > 0:
             high_margin = min(high_margin, model_stretch)
         high_margin = max(recommended, high_margin)
@@ -127,19 +122,19 @@ def api_quality_tiers() -> list[dict]:
 
 @app.get("/api/market")
 def api_market(region: str = "na", live_minutes: int = 20, sale_days: int = 7) -> list[dict]:
-    """Observed market facts plus clearly labeled evidence-based sell targets."""
+    """Observed market facts and sell targets separated by enhancement level."""
     now = time.time()
     live_since = now - max(5, live_minutes) * 60
     sale_since = now - max(1, sale_days) * 86400
 
     with db._conn() as conn:
         snapshots = conn.execute(
-            "SELECT item_id,item_name,qlt,unit_price,observed_at FROM auction_snapshot "
+            "SELECT item_id,item_name,qlt,bonus_bucket,unit_price,observed_at FROM auction_snapshot "
             "WHERE region=? AND observed_at>=? AND unit_price>0",
             (region, live_since),
         ).fetchall()
         sales = conn.execute(
-            "SELECT item_id,item_name,qlt,unit_price,observed_at FROM sale_observation "
+            "SELECT item_id,item_name,qlt,bonus_bucket,unit_price,observed_at FROM sale_observation "
             "WHERE region=? AND observed_at>=? AND unit_price>0 AND source='official_history'",
             (region, sale_since),
         ).fetchall()
@@ -153,17 +148,23 @@ def api_market(region: str = "na", live_minutes: int = 20, sale_days: int = 7) -
             (region, region),
         ).fetchall()
 
-    grouped: dict[tuple[str, int], dict] = {}
+    grouped: dict[tuple[str, int, int], dict] = {}
 
-    def ensure(item_id: str, item_name: str, qlt: int) -> dict:
-        key = (item_id, int(qlt))
+    def ensure(item_id: str, item_name: str, qlt: int, bucket: int) -> dict:
+        qlt_i = int(qlt)
+        bucket_i = int(bucket or 0)
+        key = (item_id, qlt_i, bucket_i)
         if key not in grouped:
+            level = bucket_to_upgrade_level(bucket_i)
             grouped[key] = {
                 "item_id": item_id,
                 "item_name": item_name or item_id,
-                "qlt": int(qlt),
-                "qlt_name": QUALITY_NAMES.get(int(qlt), f"Q{qlt}"),
-                "tier_color": QUALITY_COLORS.get(int(qlt), "#8b8f86"),
+                "qlt": qlt_i,
+                "qlt_name": QUALITY_NAMES.get(qlt_i, f"Q{qlt_i}"),
+                "tier_color": QUALITY_COLORS.get(qlt_i, "#8b8f86"),
+                "bonus_bucket": bucket_i,
+                "upgrade_level": level,
+                "upgrade_label": upgrade_label(level),
                 "_live": [],
                 "_sales": [],
                 "latest_observation": 0.0,
@@ -172,17 +173,17 @@ def api_market(region: str = "na", live_minutes: int = 20, sale_days: int = 7) -
         return grouped[key]
 
     for r in snapshots:
-        g = ensure(r["item_id"], r["item_name"], r["qlt"])
+        g = ensure(r["item_id"], r["item_name"], r["qlt"], r["bonus_bucket"])
         g["_live"].append(r["unit_price"])
         g["latest_observation"] = max(g["latest_observation"], r["observed_at"] or 0)
 
     for r in sales:
-        g = ensure(r["item_id"], r["item_name"], r["qlt"])
+        g = ensure(r["item_id"], r["item_name"], r["qlt"], r["bonus_bucket"])
         g["_sales"].append(r["unit_price"])
         g["latest_sale"] = max(g["latest_sale"], r["observed_at"] or 0)
 
     for v in valuations:
-        g = ensure(v["item_id"], v["item_name"], v["qlt"])
+        g = ensure(v["item_id"], v["item_name"], v["qlt"], v["bonus_bucket"])
         current = g.get("_valuation")
         if current is None or (v["confidence"] or 0) > (current["confidence"] or 0):
             g["_valuation"] = v
@@ -201,7 +202,7 @@ def api_market(region: str = "na", live_minutes: int = 20, sale_days: int = 7) -
             live_floor, live_median, len(live), sale_median, len(sales7),
             model_fair, model_stretch,
         )
-        row = {
+        result.append({
             **g,
             "live_floor": live_floor,
             "live_median": live_median,
@@ -215,10 +216,12 @@ def api_market(region: str = "na", live_minutes: int = 20, sale_days: int = 7) -
             "model_confidence": valuation["confidence"] if valuation else None,
             "price_source": "official_na_auction",
             **targets,
-        }
-        result.append(row)
+        })
 
-    result.sort(key=lambda r: (r["item_name"].lower(), r["qlt"]))
+    result.sort(key=lambda r: (
+        r["item_name"].lower(), r["qlt"],
+        -1 if r["upgrade_level"] is None else r["upgrade_level"],
+    ))
     return result
 
 
@@ -318,4 +321,4 @@ def legacy_app_js() -> FileResponse:
 
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True, "source": "official_na_auction"}
+    return {"ok": True, "source": "official_na_auction", "variant_key": "rarity+upgrade_level"}
