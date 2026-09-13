@@ -2,11 +2,14 @@
 <html lang="en" data-theme="violet">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>StalZone Build Calculator</title>
+<title>Stalzone Market</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/build-calculator-pro.css?v=2">
 <link rel="stylesheet" href="/static/build-calculator-customer.css?v=1">
+<link rel="stylesheet" href="/static/build-calculator-fixes.css?v=1">
+<script src="/static/build-calculator-preload.js?v=1"></script>
 </head>
 <body><div class="app">
 <header class="top"><div class="brand"><div class="mark"></div><div><h1>StalZone Build Calculator</h1><div class="sub">Current artifact stats · exact +level · live NA pricing</div></div></div><div class="top-actions"><select id="theme" class="control" aria-label="Color theme"><option value="violet">Violet</option><option value="green">Green</option><option value="blue">Blue</option><option value="amber">Amber</option></select><button id="save" class="btn secondary-action">Save build</button><button id="load-saved" class="btn secondary-action">Load</button><button id="share" class="btn secondary-action">Share</button><button id="reset" class="btn primary">New build</button></div></header>
@@ -23,4 +26,5 @@
 <div id="toast" class="toast"></div>
 <script src="/static/build-calculator.js?v=6"></script>
 <script src="/static/build-calculator-customer.js?v=2"></script>
+<script src="/static/build-calculator-picker-fix.js?v=1"></script>
 </body></html>
