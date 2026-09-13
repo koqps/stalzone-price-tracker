@@ -1,12 +1,15 @@
-"""
-bot_integration.py — Bridge between the existing StalZone Discord bot and the
-new price-tracking model.
+"""Bridge between the Discord bot and exact-level market intelligence.
+
+The public bot.py API is kept stable, but the second value returned by
+``get_lot_quality`` is an exact enhancement key (+N -> N/100). Internally every
+comparison is made with the explicit integer upgrade level, so +0..+15 never
+share evidence.
 """
 from __future__ import annotations
 
+import logging
 import os
 import time
-import logging
 from typing import Any
 
 try:
@@ -15,84 +18,62 @@ try:
 except ImportError:
     pass
 
-from market_db import MarketDB, bonus_bucket
+from market_db import MarketDB
+from market_variants import extract_variant
 from price_model import compute_valuation, ValuationResult
 
 log = logging.getLogger("bot_integration")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-7s  %(name)s  %(message)s")
-
 REGION = os.getenv("REGION", "na").lower()
 SALE_RECENCY_DAYS = int(os.getenv("SALE_RECENCY_DAYS", "14"))
-QUALITY_MULTIPLIERS = {
-    0: 1.0,
-    1: 1.20,
-    2: 1.50,
-    3: 2.50,
-    4: 4.00,
-    5: 6.00,
-}
+ALERT_DEDUPE_MINUTES = int(os.getenv("ALERT_DEDUPE_MINUTES", "30"))
 
-# ─── FIXED: Quality detection ───────────────────────────────────────────────
 
-QUALITY_NAMES = {
-    0: "Common",
-    1: "Uncommon",
-    2: "Special",
-    3: "Rare",
-    4: "Exclusive",
-    5: "Legendary",
-}
+def _level_from_key(value: float | int | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        # get_lot_quality returns level / 100 to preserve the old signature.
+        level = int(round(float(value) * 100))
+    except (TypeError, ValueError):
+        return None
+    return level if 0 <= level <= 15 else None
+
+
+def _level_bucket(level: int | None) -> int:
+    return int(level) * 10 if level is not None else -1
+
+
+def _raw_bonus(additional: dict | None) -> float:
+    if not isinstance(additional, dict):
+        return 0.0
+    raw = additional.get("upgrade_bonus")
+    if isinstance(raw, dict):
+        raw = raw.get("value", raw.get("amount"))
+    try:
+        return float(raw or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def get_lot_quality(lot) -> tuple[int | None, float | None]:
-    """Return (quality_tier, upgrade_bonus) for a lot, or (None, None) if
-    the quality cannot be determined.
+    """Return (quality, exact enhancement key).
+
+    The second value is ``upgrade_level / 100`` for compatibility with bot.py.
+    Unknown enhancement levels return None and are excluded instead of guessed.
     """
-    additional = getattr(lot, "additional", None)
-    if not additional or not isinstance(additional, dict):
-        return None, None
+    qlt, level, key = extract_variant(getattr(lot, "additional", None))
+    if qlt is None or level is None:
+        return qlt, None
+    return qlt, key
 
-    qlt = additional.get("qlt")
-    if qlt is None:
-        qlt = additional.get("quality")
-
-    if qlt is not None:
-        try:
-            qlt = int(qlt)
-            if not 0 <= qlt <= 5:
-                log.warning("Unexpected quality tier %d — clamping to 0-5", qlt)
-                qlt = max(0, min(5, qlt))
-        except (ValueError, TypeError):
-            qlt = None
-    else:
-        return None, None
-
-    upgrade_bonus = additional.get("upgrade_bonus")
-    if isinstance(upgrade_bonus, dict):
-        upgrade_bonus = upgrade_bonus.get("value", upgrade_bonus.get("amount"))
-    if upgrade_bonus is not None:
-        try:
-            upgrade_bonus = float(upgrade_bonus)
-        except (ValueError, TypeError):
-            upgrade_bonus = None
-    else:
-        upgrade_bonus = 0.0
-
-    return qlt, upgrade_bonus
-
-
-# ─── FIXED: Lot identity key ────────────────────────────────────────────────
 
 def lot_key(item_id: str, lot) -> str:
-    """Generate a unique lot key."""
     buyout_price = getattr(lot, "buyout_price", 0) or 0
     amount = getattr(lot, "amount", 1) or 1
     start_time = getattr(lot, "start_time", None)
     start_str = start_time.isoformat() if hasattr(start_time, "isoformat") else str(start_time)
     return f"{item_id}_{start_str}_{buyout_price}_{amount}"
 
-
-# ─── NEW: Live comparable listing checks ────────────────────────────────────
 
 def _matching_comparables(
     lots: list,
@@ -101,106 +82,66 @@ def _matching_comparables(
     upgrade_bonus: float | None,
     lot_to_skip=None,
 ) -> list[tuple[float, float]]:
-    """Find live comparable listings for the same (item, qlt, bonus_bucket)."""
-    target_bucket = bonus_bucket(upgrade_bonus)
+    target_level = _level_from_key(upgrade_bonus)
+    if target_level is None:
+        return []
     skip_key = id(lot_to_skip) if lot_to_skip is not None else None
     comparables: list[tuple[float, float]] = []
-
     for lot in lots:
         if id(lot) == skip_key:
             continue
-        lot_qlt, lot_bonus = get_lot_quality(lot)
-        if lot_qlt != qlt:
-            continue
-        if bonus_bucket(lot_bonus) != target_bucket:
+        lot_qlt, lot_key_value = get_lot_quality(lot)
+        if lot_qlt != qlt or _level_from_key(lot_key_value) != target_level:
             continue
         buyout = getattr(lot, "buyout_price", 0) or 0
         amount = getattr(lot, "amount", 1) or 1
-        if buyout <= 0:
-            continue
-        unit_price = buyout / max(amount, 1)
-        comparables.append((unit_price, amount))
-
+        if buyout > 0:
+            comparables.append((buyout / max(amount, 1), amount))
     comparables.sort(key=lambda x: x[0])
     return comparables
 
 
-def has_cheaper_comparable_listing(
-    lots: list,
-    item_id: str,
-    qlt: int,
-    upgrade_bonus: float | None,
-    current_lot,
-) -> bool:
-    """True only if another comparable lot is cheaper than the candidate."""
+def has_cheaper_comparable_listing(lots, item_id, qlt, upgrade_bonus, current_lot) -> bool:
     comparables = _matching_comparables(lots, item_id, qlt, upgrade_bonus, current_lot)
     if not comparables:
         return False
-
     buyout = getattr(current_lot, "buyout_price", 0) or 0
     amount = getattr(current_lot, "amount", 1) or 1
-    current_unit = buyout / max(amount, 1)
-
-    cheapest = comparables[0][0]
-    return cheapest < current_unit
+    return comparables[0][0] < buyout / max(amount, 1)
 
 
-def live_resale_cap_per_unit(
-    lots: list,
-    item_id: str,
-    qlt: int,
-    upgrade_bonus: float | None,
-    current_lot=None,
-) -> tuple[float | None, int]:
-    """Return (cheapest comparable unit price, count) excluding the candidate."""
+def live_resale_cap_per_unit(lots, item_id, qlt, upgrade_bonus, current_lot=None) -> tuple[float | None, int]:
     comparables = _matching_comparables(lots, item_id, qlt, upgrade_bonus, current_lot)
-    if not comparables:
-        return None, 0
-    return comparables[0][0], len(comparables)
+    return (comparables[0][0], len(comparables)) if comparables else (None, 0)
 
 
-# ─── NEW: Record observations to MarketDB ───────────────────────────────────
-
-async def record_observations(
-    db: MarketDB,
-    item_id: str,
-    item_name: str,
-    lots: list,
-    region: str = None,
-) -> int:
-    """Record active lot snapshots into MarketDB using async database execution."""
+async def record_observations(db: MarketDB, item_id: str, item_name: str, lots: list, region: str = None) -> int:
     region = region or REGION
     recorded = 0
     for lot in lots:
-        qlt, upgrade_bonus = get_lot_quality(lot)
-        if qlt is None:
+        qlt, level_key = get_lot_quality(lot)
+        level = _level_from_key(level_key)
+        if qlt is None or level is None:
             continue
-
         buyout = getattr(lot, "buyout_price", 0) or 0
         amount = getattr(lot, "amount", 1) or 1
         if buyout <= 0:
             continue
-
-        unit_price = buyout / max(amount, 1)
-        key = lot_key(item_id, lot)
-
-        if hasattr(db, "record_snapshot") and callable(getattr(db, "record_snapshot")):
-            res = db.record_snapshot(
-                item_id=item_id,
-                item_name=item_name,
-                region=region,
-                qlt=qlt,
-                bonus=upgrade_bonus or 0.0,
-                bonus_bucket=bonus_bucket(upgrade_bonus),
-                amount=amount,
-                buyout_price=buyout,
-                unit_price=unit_price,
-                lot_key=key,
-            )
-            if hasattr(res, "__await__"):
-                await res
+        additional = getattr(lot, "additional", None)
+        db.record_snapshot(
+            item_id=item_id,
+            item_name=item_name,
+            region=region,
+            qlt=qlt,
+            upgrade_level=level,
+            bonus=_raw_bonus(additional),
+            bonus_bucket=_level_bucket(level),
+            amount=amount,
+            buyout_price=buyout,
+            unit_price=buyout / max(amount, 1),
+            lot_key=lot_key(item_id, lot),
+        )
         recorded += 1
-
     return recorded
 
 
@@ -216,25 +157,44 @@ async def record_sale(
     source: str = "inferred_buyout_sale",
     confidence: float = 0.60,
 ):
-    """Record a completed sale into MarketDB asynchronously."""
     region = region or REGION
-    if hasattr(db, "record_sale") and callable(getattr(db, "record_sale")):
-        res = db.record_sale(
-            item_id=item_id,
-            item_name=item_name,
-            region=region,
-            qlt=qlt,
-            bonus_bucket=bonus_bucket(upgrade_bonus),
-            unit_price=unit_price,
-            amount=amount,
-            source=source,
-            confidence=confidence,
-        )
-        if hasattr(res, "__await__"):
-            await res
+    level = _level_from_key(upgrade_bonus)
+    if level is None:
+        return
+    db.record_sale(
+        item_id=item_id,
+        item_name=item_name,
+        region=region,
+        qlt=qlt,
+        upgrade_level=level,
+        bonus_bucket=_level_bucket(level),
+        unit_price=unit_price,
+        amount=amount,
+        source=source,
+        confidence=confidence,
+    )
 
 
-# ─── NEW: Price model integration ───────────────────────────────────────────
+def _recent_patch_context(db: MarketDB, item_id: str, item_name: str, days: int = 14) -> tuple[float, str | None]:
+    try:
+        rows = db.recent_patch_signals(days=days, limit=100)
+    except Exception:
+        return 0.0, None
+    name = (item_name or "").casefold()
+    matches = []
+    for row in rows:
+        summary = str(row["summary"] or "")
+        same_id = bool(row["item_id"] and row["item_id"] == item_id)
+        mentioned = bool(name and name in summary.casefold())
+        if same_id or mentioned:
+            matches.append(row)
+    if not matches:
+        return 0.0, None
+    newest = matches[0]
+    direction = str(newest["impact_direction"] or "uncertain")
+    title = str(newest["title"] or "Official patch")
+    return 1.0, f"{title}: {direction.replace('_', ' ')}; market may still be repricing"
+
 
 async def evaluate_lot_with_model(
     db: MarketDB,
@@ -244,46 +204,71 @@ async def evaluate_lot_with_model(
     upgrade_bonus: float | None,
     region: str = None,
 ) -> ValuationResult:
-    """Build valuation evidence from MarketDB and persist the resulting report."""
     region = region or REGION
-    bucket = bonus_bucket(upgrade_bonus)
-    since = time.time() - SALE_RECENCY_DAYS * 86400
+    level = _level_from_key(upgrade_bonus)
+    if level is None:
+        return compute_valuation(item_id, item_name, region, qlt, -1)
 
+    since = time.time() - SALE_RECENCY_DAYS * 86400
     live_rows = db.latest_snapshot(item_id, region, since)
     live_prices = [
         r["unit_price"] for r in live_rows
-        if r["qlt"] == qlt and r["bonus_bucket"] == bucket and r["unit_price"]
+        if r["qlt"] == qlt and r["upgrade_level"] == level and r["unit_price"]
     ]
-
-    sale_rows = db.recent_sales(item_id, region, qlt, bucket, since)
+    sale_rows = db.recent_sales(
+        item_id, region, qlt, _level_bucket(level), since,
+        upgrade_level=level,
+    )
     confirmed = [r["unit_price"] for r in sale_rows if r["source"] == "confirmed_bid_sale"]
     inferred = [r["unit_price"] for r in sale_rows if r["source"] == "inferred_buyout_sale"]
     official = [r["unit_price"] for r in sale_rows if r["source"] == "official_history"]
-
     community_rows = db.recent_community_signals(item_name, region, since)
     community_signals = [
         {"sentiment_score": r["sentiment_score"], "confidence": r["confidence"]}
         for r in community_rows
     ]
+    manual = db.manual_price(item_id, region, qlt, float(level) / 100.0, upgrade_level=level)
 
-    manual = db.manual_price(item_id, region, qlt, upgrade_bonus or 0.0)
     result = compute_valuation(
         item_id=item_id,
         item_name=item_name,
         region=region,
         qlt=qlt,
-        bonus_bucket=bucket,
+        bonus_bucket=_level_bucket(level),
         live_comparable_unit_prices=live_prices,
         confirmed_sale_prices=confirmed,
         inferred_sale_prices=inferred,
         official_history_prices=official,
-        quality_multiplier=QUALITY_MULTIPLIERS.get(qlt, 1.0),
+        # Official history above is already filtered to this exact rarity/+level,
+        # so never apply a guessed rarity multiplier.
+        quality_multiplier=1.0,
         community_signals=community_signals,
         manual_override=dict(manual) if manual else None,
     )
 
-    db.record_valuation(**result.as_row())
+    patch_risk, patch_context = _recent_patch_context(db, item_id, item_name)
+    if patch_risk:
+        result.confidence = max(0, result.confidence - 10)
+        if patch_context:
+            result.evidence.append(patch_context)
+
+    row = result.as_row()
+    row["upgrade_level"] = level
+    row["bonus_bucket"] = _level_bucket(level)
+    row["patch_risk"] = patch_risk
+    db.record_valuation(**row)
     return result
+
+
+def _alert_recently_recorded(db: MarketDB, item_id: str, region: str, qlt: int, level: int, observed_price: float) -> bool:
+    cutoff = time.time() - max(1, ALERT_DEDUPE_MINUTES) * 60
+    with db._conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM price_deviation_alert WHERE item_id=? AND region=? AND qlt=? "
+            "AND upgrade_level=? AND observed_price=? AND created_at>=? LIMIT 1",
+            (item_id, region, qlt, level, observed_price, cutoff),
+        ).fetchone()
+    return bool(row)
 
 
 async def should_alert_lot(
@@ -297,29 +282,46 @@ async def should_alert_lot(
     min_confidence: int = 65,
     min_margin_pct: float = 15.0,
 ) -> tuple[bool, ValuationResult | None, str]:
-    """Decide whether to send a Discord alert for a lot asynchronously."""
+    level = _level_from_key(upgrade_bonus)
+    if level is None:
+        return False, None, "Exact enhancement level unavailable"
     if has_cheaper_comparable_listing(lots, item_id, qlt, upgrade_bonus, current_lot):
-        return False, None, "Cheaper comparable listing exists — not a flip opportunity"
+        return False, None, "Cheaper exact-level comparable listing exists"
 
     cap, comparable_count = live_resale_cap_per_unit(lots, item_id, qlt, upgrade_bonus, current_lot)
-
     result = await evaluate_lot_with_model(db, item_id, item_name, qlt, upgrade_bonus, region=REGION)
-
     if result.confidence < min_confidence:
         return False, result, f"Confidence {result.confidence} below threshold {min_confidence}"
 
     buyout = getattr(current_lot, "buyout_price", 0) or 0
     amount = getattr(current_lot, "amount", 1) or 1
     unit_price = buyout / max(amount, 1)
-
     if not result.fair_value or result.fair_value <= 0:
-        return False, result, "Fair value is zero"
+        return False, result, "Fair value unavailable"
 
     margin_pct = ((result.fair_value - unit_price) / result.fair_value) * 100
     if margin_pct < min_margin_pct:
         return False, result, f"Margin {margin_pct:.1f}% below threshold {min_margin_pct}%"
-
     if cap is not None and unit_price >= cap:
-        return False, result, f"Unit price {unit_price:,.0f} >= live cap {cap:,.0f}"
+        return False, result, f"Unit price {unit_price:,.0f} >= exact-level live cap {cap:,.0f}"
+    if _alert_recently_recorded(db, item_id, REGION, qlt, level, unit_price):
+        return False, result, "Same profitable listing was already alerted recently"
 
-    return True, result, f"Profitable: {margin_pct:.1f}% margin, confidence {result.confidence}, {comparable_count} comparables"
+    db.record_alert(
+        item_id=item_id,
+        item_name=item_name,
+        region=REGION,
+        qlt=qlt,
+        upgrade_level=level,
+        bonus_bucket=_level_bucket(level),
+        alert_type="profitable_listing",
+        baseline_price=result.fair_value,
+        observed_price=unit_price,
+        deviation_pct=margin_pct,
+        severity="high" if margin_pct >= 30 else "watch",
+        message=(
+            f"{item_name} +{level}: {unit_price:,.0f} vs fair {result.fair_value:,.0f}; "
+            f"{margin_pct:.1f}% modeled margin, confidence {result.confidence}"
+        ),
+    )
+    return True, result, f"Profitable: {margin_pct:.1f}% margin, confidence {result.confidence}, {comparable_count} exact-level comparables"
