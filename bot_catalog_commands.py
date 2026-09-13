@@ -63,13 +63,10 @@ def _market_by_variant(db: MarketDB,item_id: str,region: str="na"):
             "AND source='official_history' AND observed_at>=? AND unit_price>0 AND upgrade_level BETWEEN 0 AND 15",
             (item_id,region,now-7*86400),
         ).fetchall()
-
-    # Deduplicate repeated scans of the same active lot.
     latest={}
     for r in live:
         k=r["lot_key"] or f"{r['qlt']}:{r['upgrade_level']}:{r['unit_price']}:{r['observed_at']}"
         if k not in latest or (r["observed_at"] or 0)>(latest[k]["observed_at"] or 0): latest[k]=r
-
     grouped={}
     for row in latest.values():
         key=(int(row["qlt"]),int(row["upgrade_level"]))
@@ -77,17 +74,12 @@ def _market_by_variant(db: MarketDB,item_id: str,region: str="na"):
     for row in sales:
         key=(int(row["qlt"]),int(row["upgrade_level"]))
         grouped.setdefault(key,{"live":[],"sales":[]})["sales"].append(float(row["unit_price"]))
-
     out={}
     for (qlt,level),data in grouped.items():
         floor=min(data["live"]) if data["live"] else None
         live_med=_median(data["live"]); sale_med=_median(data["sales"])
         quick,rec,high,conf=_targets(floor,live_med,len(data["live"]),sale_med,len(data["sales"]))
-        out[(qlt,level)]={
-            "qlt":qlt,"upgrade_level":level,"live_floor":floor,"live_count":len(data["live"]),
-            "sale_median":sale_med,"sale_count":len(data["sales"]),"sell_quick":quick,
-            "sell_recommended":rec,"sell_high_margin":high,"sell_confidence":conf,
-        }
+        out[(qlt,level)]={"qlt":qlt,"upgrade_level":level,"live_floor":floor,"live_count":len(data["live"]),"sale_median":sale_med,"sale_count":len(data["sales"]),"sell_quick":quick,"sell_recommended":rec,"sell_high_margin":high,"sell_confidence":conf}
     return out
 
 
@@ -108,27 +100,20 @@ def register_catalog_commands(bot: discord.Client, region: str="na") -> None:
         artifact=_find_artifact(catalog,item_name)
         if not artifact:
             await interaction.followup.send(f"Artifact '{item_name}' was not found in the official catalog.",ephemeral=True); return
-
         market=_market_by_variant(MarketDB(),artifact["item_id"],region)
         tiers=[q for q,_ in market]
-        embed=discord.Embed(
-            title=artifact["item_name"],
-            description=(f"**{artifact['artifact_class']}** artifact · `{artifact['item_id']}`\n"
-                         "Prices are separated by rarity and exact enhancement level (+0 through +15)."),
-            color=QUALITY_COLORS[max(tiers)] if tiers else 0x9B6CFF,
-        )
+        embed=discord.Embed(title=artifact["item_name"],description=(f"**{artifact['artifact_class']}** artifact · `{artifact['item_id']}`\nPrices are separated by rarity and exact enhancement level (+0 through +15)."),color=QUALITY_COLORS[max(tiers)] if tiers else 0x9B6CFF)
         if artifact.get("icon_url"): embed.set_thumbnail(url=artifact["icon_url"])
-
         market_lines=[]; sell_lines=[]
         for m in sorted(market.values(),key=lambda x:(x["qlt"],x["upgrade_level"])):
-            variant=f"{QUALITY_NAMES.get(m['qlt'],f'Q{m[\"qlt\"]}')} +{m['upgrade_level']}"
+            tier_name=QUALITY_NAMES.get(m["qlt"],f"Q{m['qlt']}")
+            variant=f"{tier_name} +{m['upgrade_level']}"
             market_lines.append(f"**{variant}** — floor {_money(m['live_floor'])} ({m['live_count']} live) · 7d median {_money(m['sale_median'])} ({m['sale_count']} sales)")
             sell_lines.append(f"**{variant}** — quick {_money(m['sell_quick'])} · recommended {_money(m['sell_recommended'])} · higher-margin {_money(m['sell_high_margin'])} · {m['sell_confidence']} confidence")
         if not market_lines:
             market_lines=["No current exact-level evidence for this artifact."]; sell_lines=["No evidence-based prediction yet."]
         embed.add_field(name="NA market by rarity + level",value="\n".join(market_lines)[:1024],inline=False)
         embed.add_field(name="Sell guidance",value="\n".join(sell_lines)[:1024],inline=False)
-
         for group,stats in list(_group_stats(artifact.get("stats") or []).items())[:4]:
             lines=[]
             for stat in stats[:5]:
