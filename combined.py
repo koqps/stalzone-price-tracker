@@ -1,6 +1,6 @@
 """
 combined.py — Runs the Discord bot and the FastAPI dashboard together in a
-single process so both share the same SQLite market database.
+single process so both share the same market database.
 """
 from __future__ import annotations
 
@@ -14,6 +14,10 @@ from scapi.config import Config
 # DatabaseLookup uses Config.REALM for its initial sync. Keep it aligned with
 # the international/global database used by the NA market tracker.
 Config.REALM = os.getenv("REALM", "global").lower()
+
+# Patch auction parsing before bot.py imports function references. This makes
+# rarity + enhancement level (+0 ... +15) the actual market-comparison key.
+import upgrade_runtime_patch  # noqa: F401,E402
 
 from dashboard.server import app
 from bot import bot, DISCORD_TOKEN, REGION
