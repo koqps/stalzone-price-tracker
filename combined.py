@@ -8,12 +8,12 @@ import time
 from pathlib import Path
 
 import uvicorn
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from scapi.config import Config
 
 Config.REALM = os.getenv("REALM", "global").lower()
 
-from dashboard.server import app
+from dashboard.server import app, db
 from dashboard.opportunities import router as opportunities_router
 from dashboard.build_calculator import router as build_calculator_router
 import bot as bot_module
@@ -24,6 +24,49 @@ app.include_router(opportunities_router)
 app.include_router(build_calculator_router)
 
 _INDEX_PATH = Path(__file__).parent / "dashboard" / "static" / "index.html"
+
+
+def _observed_artifact_fallback() -> list[dict]:
+    """Return real observed artifact identities when metadata lookup is unavailable."""
+    with db._conn() as conn:
+        rows = conn.execute(
+            "SELECT item_id, MAX(item_name) item_name FROM ("
+            " SELECT item_id,item_name FROM auction_snapshot WHERE item_id IS NOT NULL "
+            " UNION ALL "
+            " SELECT item_id,item_name FROM sale_observation WHERE item_id IS NOT NULL"
+            ") GROUP BY item_id"
+        ).fetchall()
+    return sorted(
+        [
+            {
+                "item_id": str(r["item_id"]),
+                "item_name": str(r["item_name"] or r["item_id"]),
+                "artifact_class": "Artifact",
+                "icon_url": None,
+                "description": "",
+                "stats": [],
+                "stat_groups": [],
+                "source": "observed_tracker_database_fallback",
+                "metadata_degraded": True,
+            }
+            for r in rows
+        ],
+        key=lambda x: x["item_name"].lower(),
+    )
+
+
+@app.middleware("http")
+async def keep_artifact_api_available(request, call_next):
+    """Do not let a temporary upstream catalog outage blank the market UI."""
+    try:
+        return await call_next(request)
+    except Exception:
+        if request.method == "GET" and request.url.path == "/api/artifacts":
+            logging.getLogger("combined").exception(
+                "Official artifact catalog failed; serving observed database fallback"
+            )
+            return JSONResponse(_observed_artifact_fallback(), headers={"X-Stalzone-Metadata": "degraded"})
+        raise
 
 
 @app.middleware("http")
@@ -65,12 +108,10 @@ bot_module.QUALITY_COLORS = {
     1: 0x79B84B,
     2: 0x4F98D1,
     3: 0x9A63D8,
-    4: 0xE05252,  # Exclusive = red
-    5: 0xE6A33C,  # Legendary = amber/gold
+    4: 0xE05252,
+    5: 0xE6A33C,
 }
 
-# bot.py's manual /scan calls the sender after scan_all_items already did. Wrap
-# the sender so the same lot cannot be broadcast twice within five minutes.
 _original_send_discord_alerts = bot_module.send_discord_alerts
 _sent_lots: dict[str, float] = {}
 
