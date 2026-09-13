@@ -20,7 +20,13 @@ function updateGuide(){
  if(filled!==lastFilled){lastFilled=filled;const badge=$('customer-slot-progress');if(badge)badge.textContent=`${filled}/${total||0} artifacts`}
 }
 function runAction(){const action=$('customer-next-action')?.dataset.action;if(action==='add')$('add-first')?.click();else if(action==='select'){q('#slot-list .slot-card:not(.slot-empty)')?.click();q('.editor-pane')?.scrollIntoView({behavior:'smooth',block:'start'})}else if(action==='review')q('.result-pane')?.scrollIntoView({behavior:'smooth',block:'start'})}
-function enhancePicker(){const search=$('artifact-search');if(search&&!search.dataset.customer){search.dataset.customer='1';search.setAttribute('aria-label','Search artifacts by name, class, or stat');search.placeholder='Search 103 artifacts by name or stat…'}const preview=$('picker-preview');if(preview)preview.setAttribute('aria-live','polite');qa('#artifact-list .artifact-option').forEach(x=>x.setAttribute('aria-label',`Preview ${x.querySelector('strong')?.textContent||'artifact'}`))}
+function clarifyTraitOnly(){
+ const editorEmpty=q('#artifact-editor .artifact-stats .editor-empty');
+ if(editorEmpty&&q('#artifact-editor .trait-grid')&&/No parsed stats/i.test(editorEmpty.textContent||''))editorEmpty.textContent='No fixed base stats. This artifact is configured through its rolled additional traits below.';
+ const previewEmpty=q('#picker-preview .preview-stats .editor-empty');
+ if(previewEmpty&&q('#picker-preview .picker-count')&&/No parsed stats/i.test(previewEmpty.textContent||''))previewEmpty.textContent='No fixed base-stat line. This artifact uses rolled/selected additional traits.';
+}
+function enhancePicker(){const search=$('artifact-search');if(search&&!search.dataset.customer){search.dataset.customer='1';search.setAttribute('aria-label','Search artifacts by name, class, or stat');search.placeholder='Search 103 artifacts by name or stat…'}const preview=$('picker-preview');if(preview)preview.setAttribute('aria-live','polite');qa('#artifact-list .artifact-option').forEach(x=>x.setAttribute('aria-label',`Preview ${x.querySelector('strong')?.textContent||'artifact'}`));clarifyTraitOnly()}
 function onPickerChange(){if(pickerOpen()){setTimeout(()=>{$('artifact-search')?.focus();$('artifact-search')?.select?.()},60)}}
 function movePickerFocus(dir){const opts=qa('#artifact-list .artifact-option');if(!opts.length)return;const active=document.activeElement,idx=opts.indexOf(active);const next=idx<0?(dir>0?0:opts.length-1):(idx+dir+opts.length)%opts.length;opts[next].focus();opts[next].scrollIntoView({block:'nearest'})}
 function wire(){
@@ -32,9 +38,9 @@ function wire(){
    if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();if(pickerOpen())$('artifact-search')?.focus();else $('add-first')?.click();return}
    if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){e.preventDefault();$('save')?.click()}
  });
- const obs=new MutationObserver(()=>{updateGuide();enhancePicker();onPickerChange()});
- ['slot-list','artifact-editor','picker-backdrop','kpi-danger','container-info','artifact-list'].forEach(id=>{const el=$(id);if(el)obs.observe(el,{childList:true,subtree:true,attributes:true,attributeFilter:['class','aria-hidden']})});
- updateGuide();enhancePicker();
+ const obs=new MutationObserver(()=>{updateGuide();enhancePicker();clarifyTraitOnly();onPickerChange()});
+ ['slot-list','artifact-editor','picker-backdrop','kpi-danger','container-info','artifact-list','picker-preview'].forEach(id=>{const el=$(id);if(el)obs.observe(el,{childList:true,subtree:true,attributes:true,attributeFilter:['class','aria-hidden']})});
+ updateGuide();enhancePicker();clarifyTraitOnly();
 }
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',wire);else wire();
 })();
