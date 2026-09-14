@@ -23,7 +23,9 @@ systemctl daemon-reload
 systemctl restart stalzone-tracker
 systemctl reload nginx || true
 
-for _ in $(seq 1 30); do
+# Startup can legitimately take over a minute while persistence hydrates.
+# Wait up to 3 minutes before treating the deploy as unhealthy.
+for _ in $(seq 1 90); do
   if curl -fsS http://127.0.0.1:8420/health >/dev/null 2>&1; then
     echo "Tracker updated and healthy."
     curl -fsS http://127.0.0.1:8420/health
@@ -34,5 +36,5 @@ for _ in $(seq 1 30); do
 done
 
 echo "Tracker did not become healthy in time. Recent logs:"
-journalctl -u stalzone-tracker -n 80 --no-pager
+journalctl -u stalzone-tracker -n 120 --no-pager
 exit 1
