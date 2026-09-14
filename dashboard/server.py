@@ -23,8 +23,8 @@ QUALITY_COLORS = {
     1: "#79b84b",
     2: "#4f98d1",
     3: "#9a63d8",
-    4: "#e05252",  # Exclusive
-    5: "#e6a33c",  # Legendary
+    4: "#e05252",
+    5: "#e6a33c",
 }
 
 
@@ -96,9 +96,6 @@ def _targets(live_floor, live_median, live_count, sale_median, sale_count, patch
     if sale_count:
         bits.append(f"{sale_count} exact-level official sales in 7d")
 
-    # Patch notes are context, never a made-up price multiplier. While a market
-    # is plausibly repricing, suppress the aggressive target until fresh sales
-    # accumulate and lower confidence by one step.
     if patch:
         direction = str(patch.get("direction") or "uncertain").replace("_", " ")
         bits.append(f"official patch signal: {direction}")
@@ -125,9 +122,15 @@ def quality_tiers():
 
 @app.get("/api/market")
 def market(region: str = "na", live_minutes: int = 20, sale_days: int = 7):
+    """Return the recent exact-variant market without scanning lifetime valuation history."""
     now = time.time()
     live_since = now - max(5, live_minutes) * 60
     sale_since = now - max(1, sale_days) * 86400
+    # Valuations are continuously recomputed by the collector. Looking through
+    # the entire lifetime table for MAX(computed_at) was the main production
+    # bottleneck. Six hours easily covers a complete collector cycle while
+    # keeping the query bounded even after months of operation.
+    valuation_since = now - 6 * 3600
 
     with db._conn() as conn:
         snapshots = conn.execute(
@@ -145,18 +148,17 @@ def market(region: str = "na", live_minutes: int = 20, sale_days: int = 7):
         valuations = conn.execute(
             "SELECT v.* FROM valuation_report v JOIN ("
             " SELECT item_id,qlt,upgrade_level,MAX(computed_at) mx FROM valuation_report "
-            " WHERE region=? AND upgrade_level BETWEEN 0 AND 15 GROUP BY item_id,qlt,upgrade_level"
+            " WHERE region=? AND computed_at>=? AND upgrade_level BETWEEN 0 AND 15 "
+            " GROUP BY item_id,qlt,upgrade_level"
             ") x ON v.item_id=x.item_id AND v.qlt=x.qlt AND v.upgrade_level=x.upgrade_level "
-            "AND v.computed_at=x.mx WHERE v.region=?",
-            (region, region),
+            "AND v.computed_at=x.mx WHERE v.region=? AND v.computed_at>=?",
+            (region, valuation_since, region, valuation_since),
         ).fetchall()
         patches = conn.execute(
             "SELECT * FROM patch_signal WHERE published_at>=? ORDER BY published_at DESC LIMIT 100",
             (now - 30 * 86400,),
         ).fetchall()
 
-    # A bot scan records the same active lot repeatedly. Only the newest snapshot
-    # of each lot key is a current listing; counting every scan would fake liquidity.
     latest_lots = {}
     for r in snapshots:
         key = r["lot_key"] or f"row:{r['id']}"
@@ -256,35 +258,43 @@ def patch_signals(days: int = 30):
 
 @app.get("/api/summary")
 def summary(region: str = "na"):
+    """Fast dashboard counters; avoid lifetime COUNT(*) scans on growing tables."""
+    now = time.time()
     with db._conn() as conn:
-        snaps = conn.execute("SELECT COUNT(*) FROM auction_snapshot WHERE region=?", (region,)).fetchone()[0]
-        sales = conn.execute(
-            "SELECT COUNT(*) FROM sale_observation WHERE region=? AND source='official_history'",
-            (region,),
-        ).fetchone()[0]
+        seq = {
+            str(r["name"]): int(r["seq"] or 0)
+            for r in conn.execute(
+                "SELECT name,seq FROM sqlite_sequence WHERE name IN ('auction_snapshot','sale_observation')"
+            ).fetchall()
+        }
+        # Active tracked item count only needs a recent window and remains exact
+        # for the dashboard's purpose while avoiding a lifetime DISTINCT scan.
         items = conn.execute(
-            "SELECT COUNT(DISTINCT item_id) FROM ("
-            "SELECT item_id FROM auction_snapshot WHERE region=? UNION "
-            "SELECT item_id FROM sale_observation WHERE region=? AND source='official_history')",
-            (region, region),
+            "SELECT COUNT(DISTINCT item_id) FROM auction_snapshot WHERE region=? AND observed_at>=?",
+            (region, now - 24 * 3600),
         ).fetchone()[0]
         levels = conn.execute(
-            "SELECT COUNT(DISTINCT upgrade_level) FROM sale_observation WHERE region=? AND upgrade_level BETWEEN 0 AND 15",
-            (region,),
+            "SELECT COUNT(DISTINCT upgrade_level) FROM sale_observation "
+            "WHERE region=? AND observed_at>=? AND upgrade_level BETWEEN 0 AND 15",
+            (region, now - 7 * 86400),
         ).fetchone()[0]
         alerts_count = conn.execute(
             "SELECT COUNT(*) FROM price_deviation_alert WHERE region=? AND created_at>=?",
-            (region, time.time() - 7 * 86400),
+            (region, now - 7 * 86400),
         ).fetchone()[0]
+        meta_rows = conn.execute(
+            "SELECT key,value FROM meta WHERE key IN ('live_data_ingested','last_ingestion')"
+        ).fetchall()
 
+    meta = {str(r["key"]): str(r["value"] or "") for r in meta_rows}
     return {
         "total_items": items,
-        "snapshots": snaps,
-        "sales": sales,
+        "snapshots": seq.get("auction_snapshot", 0),
+        "sales": seq.get("sale_observation", 0),
         "upgrade_levels": levels,
         "alerts": alerts_count,
-        "data_source": "official_na_live" if db.get_meta("live_data_ingested") == "true" else "waiting",
-        "last_ingestion": db.get_meta("last_ingestion", ""),
+        "data_source": "official_na_live" if meta.get("live_data_ingested") == "true" else "waiting",
+        "last_ingestion": meta.get("last_ingestion", ""),
         "persistent": "supabase" if supabase_enabled() else "local_cache_only",
     }
 
