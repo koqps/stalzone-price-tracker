@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS auction_snapshot (
  bonus_bucket INTEGER NOT NULL DEFAULT 0,amount INTEGER NOT NULL DEFAULT 1,buyout_price REAL,
  unit_price REAL,lot_key TEXT,observed_at REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_snapshot_lookup ON auction_snapshot(item_id,region,qlt,upgrade_level,observed_at);
+CREATE INDEX IF NOT EXISTS idx_snapshot_region_time ON auction_snapshot(region,observed_at);
 
 CREATE TABLE IF NOT EXISTS sale_observation (
  id INTEGER PRIMARY KEY AUTOINCREMENT,item_id TEXT NOT NULL,item_name TEXT,region TEXT NOT NULL,
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS sale_observation (
  observed_at REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_sale_lookup ON sale_observation(item_id,region,qlt,upgrade_level,observed_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sale_dedupe ON sale_observation(item_id,region,qlt,upgrade_level,unit_price,amount,source,observed_at);
+CREATE INDEX IF NOT EXISTS idx_sale_region_source_time ON sale_observation(region,source,observed_at);
 
 CREATE TABLE IF NOT EXISTS community_signal (
  id INTEGER PRIMARY KEY AUTOINCREMENT,item_id TEXT,item_name TEXT NOT NULL,region TEXT NOT NULL DEFAULT 'na',
@@ -47,6 +49,7 @@ CREATE TABLE IF NOT EXISTS valuation_report (
  inferred_sales INTEGER NOT NULL DEFAULT 0,community_signals INTEGER NOT NULL DEFAULT 0,
  community_bias REAL NOT NULL DEFAULT 0,patch_risk REAL NOT NULL DEFAULT 0,evidence_summary TEXT,computed_at REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_valuation_lookup ON valuation_report(item_id,region,qlt,upgrade_level,computed_at);
+CREATE INDEX IF NOT EXISTS idx_valuation_region_variant_time ON valuation_report(region,item_id,qlt,upgrade_level,computed_at);
 
 CREATE TABLE IF NOT EXISTS price_deviation_alert (
  id INTEGER PRIMARY KEY AUTOINCREMENT,item_id TEXT NOT NULL,item_name TEXT NOT NULL,region TEXT NOT NULL,
@@ -54,6 +57,7 @@ CREATE TABLE IF NOT EXISTS price_deviation_alert (
  alert_type TEXT NOT NULL,baseline_price REAL,observed_price REAL,deviation_pct REAL,severity TEXT NOT NULL,
  message TEXT,created_at REAL NOT NULL,acknowledged INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS idx_alert_lookup ON price_deviation_alert(created_at,severity);
+CREATE INDEX IF NOT EXISTS idx_alert_region_time ON price_deviation_alert(region,created_at);
 
 CREATE TABLE IF NOT EXISTS patch_signal (
  id INTEGER PRIMARY KEY AUTOINCREMENT,patch_id TEXT NOT NULL,published_at REAL NOT NULL,source_url TEXT NOT NULL,
@@ -61,6 +65,7 @@ CREATE TABLE IF NOT EXISTS patch_signal (
  impact_direction TEXT NOT NULL DEFAULT 'uncertain',confidence REAL NOT NULL DEFAULT 0.25,
  summary TEXT,collected_at REAL NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_patch_dedupe ON patch_signal(patch_id,item_id,signal_type);
+CREATE INDEX IF NOT EXISTS idx_patch_published ON patch_signal(published_at);
 
 CREATE TABLE IF NOT EXISTS manual_prices (
  item_id TEXT NOT NULL,region TEXT NOT NULL,qlt INTEGER NOT NULL,upgrade_level INTEGER NOT NULL DEFAULT -1,
@@ -90,8 +95,14 @@ class MarketDB:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         with self._conn() as conn:
+            # WAL lets the collector keep writing while dashboard readers query
+            # recent market data. The old rollback journal serialized those two
+            # workloads and caused Nginx upstream timeouts under an active scan.
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
             conn.executescript(SCHEMA)
             self._upgrade_legacy_schema(conn)
+            conn.execute("ANALYZE")
             key = str(path.resolve())
             if supabase_enabled() and key not in self._hydrated_paths:
                 hydrate_sqlite(conn)
@@ -109,8 +120,9 @@ class MarketDB:
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path, timeout=30)
+        conn = sqlite3.connect(self.path, timeout=10)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=10000")
         try:
             yield conn
             conn.commit()
