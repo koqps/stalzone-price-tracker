@@ -218,7 +218,7 @@ async def load_artifact_catalog(force: bool = False) -> dict[str, dict[str, Any]
                 if not item and data_path:
                     try:
                         item = await asyncio.to_thread(
-                            _download_json, f"{_ICON_BASE}/{REAL]}/{data_path}"
+                            _download_json, f"{_ICON_BASE}/{REALM}/{data_path}"
                         )
                     except Exception:
                         item = {}
