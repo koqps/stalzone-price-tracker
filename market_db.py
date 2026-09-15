@@ -205,6 +205,16 @@ class MarketDB:
 
     def record_valuation(self, **fields: Any) -> None:
         fields.setdefault("upgrade_level", -1); fields.setdefault("patch_risk", 0.0); fields.setdefault("computed_at", time.time())
+        # A scan evaluates many lots from the same exact variant. Persist at most
+        # one valuation per variant every two minutes instead of one per lot.
+        with self._conn() as conn:
+            recent = conn.execute(
+                "SELECT computed_at FROM valuation_report WHERE item_id=? AND region=? AND qlt=? "
+                "AND upgrade_level=? ORDER BY computed_at DESC LIMIT 1",
+                (fields["item_id"], fields["region"], fields["qlt"], fields["upgrade_level"]),
+            ).fetchone()
+        if recent and float(fields["computed_at"]) - float(recent["computed_at"] or 0) < 120:
+            return
         self._insert("valuation_report", fields)
 
     def record_alert(self, **fields: Any) -> None:
@@ -234,8 +244,14 @@ class MarketDB:
                 (item_name,region,since,limit),
             ).fetchall()
 
-    def latest_snapshot(self, item_id: str, region: str, since: float) -> list[sqlite3.Row]:
+    def latest_snapshot(self, item_id: str, region: str, since: float, qlt: int | None = None, upgrade_level: int | None = None) -> list[sqlite3.Row]:
         with self._conn() as conn:
+            if qlt is not None and upgrade_level is not None:
+                return conn.execute(
+                    "SELECT * FROM auction_snapshot WHERE item_id=? AND region=? AND qlt=? AND upgrade_level=? "
+                    "AND observed_at>=? ORDER BY observed_at DESC",
+                    (item_id, region, qlt, upgrade_level, since),
+                ).fetchall()
             return conn.execute(
                 "SELECT * FROM auction_snapshot WHERE item_id=? AND region=? AND observed_at>=? ORDER BY observed_at DESC",
                 (item_id,region,since),
