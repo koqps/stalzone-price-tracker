@@ -26,13 +26,14 @@ log = logging.getLogger("bot_integration")
 REGION = os.getenv("REGION", "na").lower()
 SALE_RECENCY_DAYS = int(os.getenv("SALE_RECENCY_DAYS", "14"))
 ALERT_DEDUPE_MINUTES = int(os.getenv("ALERT_DEDUPE_MINUTES", "30"))
+LIVE_SNAPSHOT_MINUTES = int(os.getenv("LIVE_SNAPSHOT_MINUTES", "20"))
+_valuation_cache: dict[tuple[str, str, int, int], tuple[float, ValuationResult]] = {}
 
 
 def _level_from_key(value: float | int | None) -> int | None:
     if value is None:
         return None
     try:
-        # get_lot_quality returns level / 100 to preserve the old signature.
         level = int(round(float(value) * 100))
     except (TypeError, ValueError):
         return None
@@ -56,11 +57,6 @@ def _raw_bonus(additional: dict | None) -> float:
 
 
 def get_lot_quality(lot) -> tuple[int | None, float | None]:
-    """Return (quality, exact enhancement key).
-
-    The second value is ``upgrade_level / 100`` for compatibility with bot.py.
-    Unknown enhancement levels return None and are excluded instead of guessed.
-    """
     qlt, level, key = extract_variant(getattr(lot, "additional", None))
     if qlt is None or level is None:
         return qlt, None
@@ -75,13 +71,7 @@ def lot_key(item_id: str, lot) -> str:
     return f"{item_id}_{start_str}_{buyout_price}_{amount}"
 
 
-def _matching_comparables(
-    lots: list,
-    item_id: str,
-    qlt: int,
-    upgrade_bonus: float | None,
-    lot_to_skip=None,
-) -> list[tuple[float, float]]:
+def _matching_comparables(lots: list, item_id: str, qlt: int, upgrade_bonus: float | None, lot_to_skip=None) -> list[tuple[float, float]]:
     target_level = _level_from_key(upgrade_bonus)
     if target_level is None:
         return []
@@ -117,6 +107,8 @@ def live_resale_cap_per_unit(lots, item_id, qlt, upgrade_bonus, current_lot=None
 
 async def record_observations(db: MarketDB, item_id: str, item_name: str, lots: list, region: str = None) -> int:
     region = region or REGION
+    with db._conn() as conn:
+        conn.execute("DELETE FROM auction_snapshot WHERE item_id=? AND region=?", (item_id, region))
     recorded = 0
     for lot in lots:
         qlt, level_key = get_lot_quality(lot)
@@ -145,18 +137,7 @@ async def record_observations(db: MarketDB, item_id: str, item_name: str, lots: 
     return recorded
 
 
-async def record_sale(
-    db: MarketDB,
-    item_id: str,
-    item_name: str,
-    qlt: int,
-    upgrade_bonus: float | None,
-    unit_price: float,
-    amount: int = 1,
-    region: str = None,
-    source: str = "inferred_buyout_sale",
-    confidence: float = 0.60,
-):
+async def record_sale(db: MarketDB, item_id: str, item_name: str, qlt: int, upgrade_bonus: float | None, unit_price: float, amount: int = 1, region: str = None, source: str = "inferred_buyout_sale", confidence: float = 0.60):
     region = region or REGION
     level = _level_from_key(upgrade_bonus)
     if level is None:
@@ -196,37 +177,28 @@ def _recent_patch_context(db: MarketDB, item_id: str, item_name: str, days: int 
     return 1.0, f"{title}: {direction.replace('_', ' ')}; market may still be repricing"
 
 
-async def evaluate_lot_with_model(
-    db: MarketDB,
-    item_id: str,
-    item_name: str,
-    qlt: int,
-    upgrade_bonus: float | None,
-    region: str = None,
-) -> ValuationResult:
+async def evaluate_lot_with_model(db: MarketDB, item_id: str, item_name: str, qlt: int, upgrade_bonus: float | None, region: str = None) -> ValuationResult:
     region = region or REGION
     level = _level_from_key(upgrade_bonus)
     if level is None:
         return compute_valuation(item_id, item_name, region, qlt, -1)
 
-    since = time.time() - SALE_RECENCY_DAYS * 86400
-    live_rows = db.latest_snapshot(item_id, region, since)
-    live_prices = [
-        r["unit_price"] for r in live_rows
-        if r["qlt"] == qlt and r["upgrade_level"] == level and r["unit_price"]
-    ]
-    sale_rows = db.recent_sales(
-        item_id, region, qlt, _level_bucket(level), since,
-        upgrade_level=level,
-    )
+    now = time.time()
+    cache_key = (item_id, region, int(qlt), int(level))
+    cached = _valuation_cache.get(cache_key)
+    if cached and now - cached[0] < 90:
+        return cached[1]
+
+    since = now - SALE_RECENCY_DAYS * 86400
+    live_since = now - max(5, LIVE_SNAPSHOT_MINUTES) * 60
+    live_rows = db.latest_snapshot(item_id, region, live_since, qlt=qlt, upgrade_level=level)
+    live_prices = [r["unit_price"] for r in live_rows if r["unit_price"]]
+    sale_rows = db.recent_sales(item_id, region, qlt, _level_bucket(level), since, upgrade_level=level)
     confirmed = [r["unit_price"] for r in sale_rows if r["source"] == "confirmed_bid_sale"]
     inferred = [r["unit_price"] for r in sale_rows if r["source"] == "inferred_buyout_sale"]
     official = [r["unit_price"] for r in sale_rows if r["source"] == "official_history"]
     community_rows = db.recent_community_signals(item_name, region, since)
-    community_signals = [
-        {"sentiment_score": r["sentiment_score"], "confidence": r["confidence"]}
-        for r in community_rows
-    ]
+    community_signals = [{"sentiment_score": r["sentiment_score"], "confidence": r["confidence"]} for r in community_rows]
     manual = db.manual_price(item_id, region, qlt, float(level) / 100.0, upgrade_level=level)
 
     result = compute_valuation(
@@ -239,8 +211,6 @@ async def evaluate_lot_with_model(
         confirmed_sale_prices=confirmed,
         inferred_sale_prices=inferred,
         official_history_prices=official,
-        # Official history above is already filtered to this exact rarity/+level,
-        # so never apply a guessed rarity multiplier.
         quality_multiplier=1.0,
         community_signals=community_signals,
         manual_override=dict(manual) if manual else None,
@@ -257,6 +227,12 @@ async def evaluate_lot_with_model(
     row["bonus_bucket"] = _level_bucket(level)
     row["patch_risk"] = patch_risk
     db.record_valuation(**row)
+    _valuation_cache[cache_key] = (now, result)
+    if len(_valuation_cache) > 5000:
+        cutoff = now - 300
+        for key, (ts, _) in list(_valuation_cache.items()):
+            if ts < cutoff:
+                _valuation_cache.pop(key, None)
     return result
 
 
@@ -264,24 +240,13 @@ def _alert_recently_recorded(db: MarketDB, item_id: str, region: str, qlt: int, 
     cutoff = time.time() - max(1, ALERT_DEDUPE_MINUTES) * 60
     with db._conn() as conn:
         row = conn.execute(
-            "SELECT 1 FROM price_deviation_alert WHERE item_id=? AND region=? AND qlt=? "
-            "AND upgrade_level=? AND observed_price=? AND created_at>=? LIMIT 1",
+            "SELECT 1 FROM price_deviation_alert WHERE item_id=? AND region=? AND qlt=? AND upgrade_level=? AND observed_price=? AND created_at>=? LIMIT 1",
             (item_id, region, qlt, level, observed_price, cutoff),
         ).fetchone()
     return bool(row)
 
 
-async def should_alert_lot(
-    db: MarketDB,
-    item_id: str,
-    item_name: str,
-    qlt: int,
-    upgrade_bonus: float | None,
-    lots: list,
-    current_lot,
-    min_confidence: int = 65,
-    min_margin_pct: float = 15.0,
-) -> tuple[bool, ValuationResult | None, str]:
+async def should_alert_lot(db: MarketDB, item_id: str, item_name: str, qlt: int, upgrade_bonus: float | None, lots: list, current_lot, min_confidence: int = 65, min_margin_pct: float = 15.0) -> tuple[bool, ValuationResult | None, str]:
     level = _level_from_key(upgrade_bonus)
     if level is None:
         return False, None, "Exact enhancement level unavailable"
@@ -319,9 +284,6 @@ async def should_alert_lot(
         observed_price=unit_price,
         deviation_pct=margin_pct,
         severity="high" if margin_pct >= 30 else "watch",
-        message=(
-            f"{item_name} +{level}: {unit_price:,.0f} vs fair {result.fair_value:,.0f}; "
-            f"{margin_pct:.1f}% modeled margin, confidence {result.confidence}"
-        ),
+        message=(f"{item_name} +{level}: {unit_price:,.0f} vs fair {result.fair_value:,.0f}; {margin_pct:.1f}% modeled margin, confidence {result.confidence}"),
     )
     return True, result, f"Profitable: {margin_pct:.1f}% margin, confidence {result.confidence}, {comparable_count} exact-level comparables"
