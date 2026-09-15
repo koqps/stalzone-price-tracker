@@ -9,6 +9,7 @@ before expensive hydration/index maintenance begins.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -112,6 +113,17 @@ class MarketDB:
         self._schedule_background_maintenance()
 
     def _schedule_background_maintenance(self) -> None:
+        # The Google production VM is the live collector and has a persistent
+        # SQLite cache. Running hydration/index rebuilds inside that same
+        # process competes with collector writes and can lock every dashboard
+        # endpoint. Render explicitly sets COLLECTOR_ENABLED=false, so it can
+        # still hydrate its ephemeral cache in the background.
+        collector_enabled = os.getenv("COLLECTOR_ENABLED", "true").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        if collector_enabled:
+            log.info("Skipping background database maintenance while collector is enabled")
+            return
         key = str(self.path.resolve())
         with self._maintenance_lock:
             if key in self._maintenance_paths:
