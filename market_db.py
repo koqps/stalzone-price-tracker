@@ -2,10 +2,15 @@
 
 Render's local filesystem is only a cache. Writes are mirrored to Supabase and
 recent durable history is hydrated back into SQLite after a restart.
+
+Startup is intentionally lightweight: the HTTP server must be able to bind
+before expensive hydration/index maintenance begins.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,25 +18,24 @@ from typing import Any, Iterator
 
 from supabase_sync import hydrate_sqlite, mirror, enabled as supabase_enabled
 
+log = logging.getLogger("market_db")
 DB_PATH = Path(__file__).parent / "cache" / "market.db"
 
-SCHEMA = """
+# Only tables plus correctness-critical unique indexes live on the synchronous
+# startup path. The larger read-optimization indexes are built in background.
+CORE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS auction_snapshot (
  id INTEGER PRIMARY KEY AUTOINCREMENT,item_id TEXT NOT NULL,item_name TEXT,region TEXT NOT NULL,
  qlt INTEGER NOT NULL,upgrade_level INTEGER NOT NULL DEFAULT -1,bonus REAL NOT NULL DEFAULT 0,
  bonus_bucket INTEGER NOT NULL DEFAULT 0,amount INTEGER NOT NULL DEFAULT 1,buyout_price REAL,
  unit_price REAL,lot_key TEXT,observed_at REAL NOT NULL);
-CREATE INDEX IF NOT EXISTS idx_snapshot_lookup ON auction_snapshot(item_id,region,qlt,upgrade_level,observed_at);
-CREATE INDEX IF NOT EXISTS idx_snapshot_region_time ON auction_snapshot(region,observed_at);
 
 CREATE TABLE IF NOT EXISTS sale_observation (
  id INTEGER PRIMARY KEY AUTOINCREMENT,item_id TEXT NOT NULL,item_name TEXT,region TEXT NOT NULL,
  qlt INTEGER NOT NULL,upgrade_level INTEGER NOT NULL DEFAULT -1,bonus_bucket INTEGER NOT NULL DEFAULT 0,
  unit_price REAL NOT NULL,amount INTEGER NOT NULL DEFAULT 1,source TEXT NOT NULL,confidence REAL NOT NULL,
  observed_at REAL NOT NULL);
-CREATE INDEX IF NOT EXISTS idx_sale_lookup ON sale_observation(item_id,region,qlt,upgrade_level,observed_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sale_dedupe ON sale_observation(item_id,region,qlt,upgrade_level,unit_price,amount,source,observed_at);
-CREATE INDEX IF NOT EXISTS idx_sale_region_source_time ON sale_observation(region,source,observed_at);
 
 CREATE TABLE IF NOT EXISTS community_signal (
  id INTEGER PRIMARY KEY AUTOINCREMENT,item_id TEXT,item_name TEXT NOT NULL,region TEXT NOT NULL DEFAULT 'na',
@@ -39,7 +43,6 @@ CREATE TABLE IF NOT EXISTS community_signal (
  sentiment TEXT NOT NULL DEFAULT 'neutral',sentiment_score REAL NOT NULL DEFAULT 0,source TEXT NOT NULL,
  source_name TEXT,url TEXT,excerpt TEXT,confidence REAL NOT NULL DEFAULT 0.15,collected_at REAL NOT NULL,
  reviewed INTEGER NOT NULL DEFAULT 0);
-CREATE INDEX IF NOT EXISTS idx_community_lookup ON community_signal(item_name,region,collected_at);
 
 CREATE TABLE IF NOT EXISTS valuation_report (
  id INTEGER PRIMARY KEY AUTOINCREMENT,item_id TEXT NOT NULL,item_name TEXT NOT NULL,region TEXT NOT NULL,
@@ -48,16 +51,12 @@ CREATE TABLE IF NOT EXISTS valuation_report (
  live_comparables INTEGER NOT NULL DEFAULT 0,confirmed_sales INTEGER NOT NULL DEFAULT 0,
  inferred_sales INTEGER NOT NULL DEFAULT 0,community_signals INTEGER NOT NULL DEFAULT 0,
  community_bias REAL NOT NULL DEFAULT 0,patch_risk REAL NOT NULL DEFAULT 0,evidence_summary TEXT,computed_at REAL NOT NULL);
-CREATE INDEX IF NOT EXISTS idx_valuation_lookup ON valuation_report(item_id,region,qlt,upgrade_level,computed_at);
-CREATE INDEX IF NOT EXISTS idx_valuation_region_variant_time ON valuation_report(region,item_id,qlt,upgrade_level,computed_at);
 
 CREATE TABLE IF NOT EXISTS price_deviation_alert (
  id INTEGER PRIMARY KEY AUTOINCREMENT,item_id TEXT NOT NULL,item_name TEXT NOT NULL,region TEXT NOT NULL,
  qlt INTEGER NOT NULL,upgrade_level INTEGER NOT NULL DEFAULT -1,bonus_bucket INTEGER NOT NULL DEFAULT 0,
  alert_type TEXT NOT NULL,baseline_price REAL,observed_price REAL,deviation_pct REAL,severity TEXT NOT NULL,
  message TEXT,created_at REAL NOT NULL,acknowledged INTEGER NOT NULL DEFAULT 0);
-CREATE INDEX IF NOT EXISTS idx_alert_lookup ON price_deviation_alert(created_at,severity);
-CREATE INDEX IF NOT EXISTS idx_alert_region_time ON price_deviation_alert(region,created_at);
 
 CREATE TABLE IF NOT EXISTS patch_signal (
  id INTEGER PRIMARY KEY AUTOINCREMENT,patch_id TEXT NOT NULL,published_at REAL NOT NULL,source_url TEXT NOT NULL,
@@ -65,7 +64,6 @@ CREATE TABLE IF NOT EXISTS patch_signal (
  impact_direction TEXT NOT NULL DEFAULT 'uncertain',confidence REAL NOT NULL DEFAULT 0.25,
  summary TEXT,collected_at REAL NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_patch_dedupe ON patch_signal(patch_id,item_id,signal_type);
-CREATE INDEX IF NOT EXISTS idx_patch_published ON patch_signal(published_at);
 
 CREATE TABLE IF NOT EXISTS manual_prices (
  item_id TEXT NOT NULL,region TEXT NOT NULL,qlt INTEGER NOT NULL,upgrade_level INTEGER NOT NULL DEFAULT -1,
@@ -76,38 +74,76 @@ CREATE TABLE IF NOT EXISTS manual_prices (
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT,updated_at REAL);
 """
 
+OPTIMIZATION_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_snapshot_lookup ON auction_snapshot(item_id,region,qlt,upgrade_level,observed_at);
+CREATE INDEX IF NOT EXISTS idx_snapshot_region_time ON auction_snapshot(region,observed_at);
+CREATE INDEX IF NOT EXISTS idx_sale_lookup ON sale_observation(item_id,region,qlt,upgrade_level,observed_at);
+CREATE INDEX IF NOT EXISTS idx_sale_region_source_time ON sale_observation(region,source,observed_at);
+CREATE INDEX IF NOT EXISTS idx_community_lookup ON community_signal(item_name,region,collected_at);
+CREATE INDEX IF NOT EXISTS idx_valuation_lookup ON valuation_report(item_id,region,qlt,upgrade_level,computed_at);
+CREATE INDEX IF NOT EXISTS idx_valuation_region_variant_time ON valuation_report(region,item_id,qlt,upgrade_level,computed_at);
+CREATE INDEX IF NOT EXISTS idx_alert_lookup ON price_deviation_alert(created_at,severity);
+CREATE INDEX IF NOT EXISTS idx_alert_region_time ON price_deviation_alert(region,created_at);
+CREATE INDEX IF NOT EXISTS idx_patch_published ON patch_signal(published_at);
+"""
+
 
 def bonus_bucket(bonus: float | None, step_pct: float = 1.0) -> int:
-    """Bucket ordinary bonus fractions at 1% resolution.
-
-    Exact enhancement separation does NOT rely on this bucket; production
-    comparisons use the explicit ``upgrade_level`` column. The finer default
-    also preserves +N compatibility keys without merging neighboring levels.
-    """
     bonus_pct = max(0.0, float(bonus or 0.0)) * 100
     return int(round(bonus_pct / step_pct) * step_pct * 10)
 
 
 class MarketDB:
     _hydrated_paths: set[str] = set()
+    _maintenance_paths: set[str] = set()
+    _maintenance_lock = threading.Lock()
 
     def __init__(self, path: Path = DB_PATH) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
+        # Keep this path short. combined.py imports multiple MarketDB users
+        # before uvicorn.run(), so any expensive work here creates a full-site 502.
         with self._conn() as conn:
-            # WAL lets the collector keep writing while dashboard readers query
-            # recent market data. The old rollback journal serialized those two
-            # workloads and caused Nginx upstream timeouts under an active scan.
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
-            conn.executescript(SCHEMA)
+            conn.executescript(CORE_SCHEMA)
             self._upgrade_legacy_schema(conn)
-            conn.execute("ANALYZE")
-            key = str(path.resolve())
-            if supabase_enabled() and key not in self._hydrated_paths:
-                hydrate_sqlite(conn)
-                self._hydrated_paths.add(key)
         mirror.start()
+        self._schedule_background_maintenance()
+
+    def _schedule_background_maintenance(self) -> None:
+        key = str(self.path.resolve())
+        with self._maintenance_lock:
+            if key in self._maintenance_paths:
+                return
+            self._maintenance_paths.add(key)
+        threading.Thread(
+            target=self._background_maintenance,
+            daemon=True,
+            name="market-db-maintenance",
+        ).start()
+
+    def _background_maintenance(self) -> None:
+        """Hydrate/optimize after HTTP startup instead of blocking uvicorn bind."""
+        key = str(self.path.resolve())
+        # Give combined.main() time to reach uvicorn.run() first.
+        time.sleep(12)
+        try:
+            if supabase_enabled() and key not in self._hydrated_paths:
+                with self._conn() as conn:
+                    log.info("Starting background Supabase hydration")
+                    hydrate_sqlite(conn)
+                self._hydrated_paths.add(key)
+                log.info("Background Supabase hydration complete")
+            with self._conn() as conn:
+                log.info("Starting background SQLite index maintenance")
+                conn.executescript(OPTIMIZATION_INDEXES)
+                conn.execute("ANALYZE")
+                conn.execute("PRAGMA optimize")
+            log.info("Background SQLite maintenance complete")
+        except Exception:
+            # Maintenance is best-effort. Never kill HTTP availability.
+            log.exception("Background database maintenance failed")
 
     def _upgrade_legacy_schema(self, conn: sqlite3.Connection) -> None:
         for table in ("auction_snapshot","sale_observation","community_signal","valuation_report","price_deviation_alert","manual_prices"):
