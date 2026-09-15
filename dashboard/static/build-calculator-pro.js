@@ -22,7 +22,7 @@ async function get(path){const r=await fetch(API+path,{cache:'no-store'});if(!r.
 function toast(t){const e=$('toast');e.textContent=t;e.classList.add('show');setTimeout(()=>e.classList.remove('show'),1700)}
 function clamp(n,a,b){return Math.min(b,Math.max(a,+n||0))}
 function syncCapacity(){const c=currentContainer(),n=Math.max(0,+c?.capacity||0);while(state.slots.length<n)state.slots.push(emptySlot());if(state.slots.length>n)state.slots.length=n;if(state.selected>=n)state.selected=Math.max(0,n-1)}
-function wikiRange(st){const a=+st.min,b=+st.max;if(a<=0&&b<=0)return{best:Math.min(a,b),worst:Math.max(a,b)};return{best:Math.min(a,b),worst:Math.max(a,b)}}
+function wikiRange(st){const a=+st.min,b=+st.max;if(st.isPositive){if(a<=0&&b<=0)return{best:Math.min(a,b),worst:Math.max(a,b)};return{best:Math.max(a,b),worst:Math.min(a,b)}}return{best:Math.min(a,b),worst:Math.max(a,b)}}
 function legalRarities(q){q=+q;if(q<100)return[0];if(q===100)return[0,1];if(q>100&&q<115)return[1];if(q===115)return[1,2];if(q>115&&q<130)return[2];if(q===130)return[2,3];if(q>130&&q<145)return[3];if(q===145)return[3,4];if(q>145&&q<160)return[4];if(q===160)return[4,5];return[5]}
 function normalizeSlot(s,preferLower=false){s.level=Math.round(clamp(s.level,0,15));s.quality=clamp(s.quality,0,175);const legal=legalRarities(s.quality);if(!legal.includes(+s.qlt))s.qlt=preferLower?legal[0]:legal[legal.length-1];s.traits=Array.isArray(s.traits)?s.traits:[];return s}
 function panelValue(st,s){const {best,worst}=wikiRange(st),q=+s.quality,level=1+2*(+s.level)/100;if(st.isPositive)return best*(q/100)*level;if(q<=100)return best+(worst-best)*(q/100);const rr=rarity(s.qlt),span=Math.max(.001,rr.max-rr.min),p=clamp((q-rr.min)/span,0,1);return best+(worst-best)*p}
