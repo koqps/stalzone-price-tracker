@@ -1,6 +1,7 @@
 """Run the Discord bot, dashboard, persistence, and patch monitor together."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ from scapi.config import Config
 Config.REALM = os.getenv("REALM", "global").lower()
 
 from dashboard.server import app, db
+from artifact_catalog import load_artifact_catalog
 from dashboard.opportunities import router as opportunities_router
 from dashboard.build_calculator import router as build_calculator_router
 import bot as bot_module
@@ -37,6 +39,18 @@ _CLASS_LABELS = {
     "thermal": "Thermal",
     "other_arts": "Other",
 }
+
+_CLASS_FOLDERS = {
+    "Biochemical": "biochemical",
+    "Electrophysical": "electrophysical",
+    "Gravity": "gravity",
+    "Thermal": "thermal",
+    "Other": "other_arts",
+}
+
+def _fallback_icon_url(item_id: str, artifact_class: str) -> str:
+    folder = _CLASS_FOLDERS.get(artifact_class, "other_arts")
+    return f"https://raw.githubusercontent.com/EXBO-Studio/stalzone-database/main/global/icons/artefact/{folder}/{item_id}.png"
 
 
 def _read_persistent_metadata() -> dict[str, dict]:
@@ -67,7 +81,9 @@ def _normalized_artifact_metadata() -> dict[str, dict]:
     global _normalized_fallback_cache
     now = time.time()
     if _normalized_fallback_cache and now - _normalized_fallback_cache[0] < 6 * 3600:
-        return _normalized_fallback_cache[1]
+        cached = _normalized_fallback_cache[1]
+        if cached and all(row.get("icon_url") for row in cached.values()):
+            return cached
     try:
         req = urllib.request.Request(
             _NORMALIZED_ARTIFACTS_URL,
@@ -113,9 +129,11 @@ def _normalized_artifact_metadata() -> dict[str, dict]:
                     "harmful": not bool(st.get("isPositive", True)),
                     "kind": "range",
                 })
+            clean_category = category.strip("/")
             out[item_id] = {
                 "item_name": row.get("name") or item_id,
                 "artifact_class": _CLASS_LABELS.get(key, key.replace("_", " ").title()),
+                "icon_url": f"https://raw.githubusercontent.com/EXBO-Studio/stalzone-database/main/global/icons/{clean_category}/{item_id}.png",
                 "stats": stats,
                 "stat_groups": [],
             }
@@ -144,20 +162,20 @@ def _observed_artifact_fallback() -> list[dict]:
             " SELECT item_id,item_name FROM sale_observation WHERE item_id IS NOT NULL"
             ") GROUP BY item_id"
         ).fetchall()
+    observed = {str(r["item_id"]): str(r["item_name"] or r["item_id"]) for r in rows}
     result = []
-    for r in rows:
-        item_id = str(r["item_id"])
+    for item_id in sorted(set(observed) | set(meta)):
         m = meta.get(item_id) or {}
         enriched = bool(m)
         result.append({
             "item_id": item_id,
-            "item_name": str(m.get("item_name") or r["item_name"] or item_id),
+            "item_name": str(m.get("item_name") or observed.get(item_id) or item_id),
             "artifact_class": m.get("artifact_class") or "Artifact",
-            "icon_url": None,
-            "description": "",
+            "icon_url": m.get("icon_url") or _fallback_icon_url(item_id, str(m.get("artifact_class") or "Other")),
+            "description": m.get("description") or "",
             "stats": m.get("stats") or [],
             "stat_groups": m.get("stat_groups") or [],
-            "source": "normalized_exbo_cached_plus_observed_market" if enriched else "observed_tracker_database_fast",
+            "source": str(m.get("metadata_source") or "normalized_exbo_cached_plus_observed_market") if enriched else "observed_tracker_database_fast",
             "metadata_degraded": not enriched,
         })
     return sorted(result, key=lambda x: x["item_name"].lower())
@@ -171,7 +189,7 @@ async def keep_artifact_api_available(request, call_next):
         degraded = any(bool(row.get("metadata_degraded")) for row in rows)
         return JSONResponse(
             rows,
-            headers={"X-Stalzone-Metadata": "warming" if degraded else "cached-normalized"},
+            headers={"X-Stalzone-Metadata": "warming" if degraded else "cached-official"},
         )
     return await call_next(request)
 
@@ -259,12 +277,33 @@ def run_patch_monitor() -> None:
 
 
 def warm_artifact_metadata() -> None:
-    """Refresh rich market metadata after startup without delaying HTTP readiness."""
+    """Refresh current official artifact metadata after HTTP startup begins."""
+    global _normalized_fallback_cache
     try:
-        rows = _normalized_artifact_metadata()
-        log.info("Artifact market metadata warmup ready: %s items", len(rows))
+        catalog = asyncio.run(load_artifact_catalog(force=True))
+        rows: dict[str, dict] = {}
+        for item_id, item in catalog.items():
+            rows[item_id] = {
+                "item_name": item.get("item_name") or item_id,
+                "artifact_class": item.get("artifact_class") or "Artifact",
+                "icon_url": item.get("icon_url") or _fallback_icon_url(item_id, str(item.get("artifact_class") or "Other")),
+                "description": item.get("description") or "",
+                "stats": item.get("stats") or [],
+                "stat_groups": item.get("stat_groups") or [],
+                "metadata_source": "official_exbo_current",
+            }
+        _normalized_fallback_cache = (time.time(), rows)
+        _NORMALIZED_CACHE_PATH.write_text(
+            json.dumps(rows, ensure_ascii=False, separators=(",", ":")), encoding="utf-8"
+        )
+        log.info("Official artifact metadata warmup ready: %s items", len(rows))
     except Exception:
-        log.exception("Artifact market metadata warmup failed")
+        log.exception("Official artifact metadata warmup failed; trying normalized fallback")
+        try:
+            rows = _normalized_artifact_metadata()
+            log.info("Normalized fallback metadata ready: %s items", len(rows))
+        except Exception:
+            log.exception("Artifact market metadata fallback also failed")
 
 
 def main() -> None:

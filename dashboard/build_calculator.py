@@ -90,17 +90,73 @@ def _level_zero_row(rows: list[dict]) -> dict:
     return min(rows, key=score)
 
 
-def _merge_stat_metadata(stats: list[dict], defs: dict[str, dict]) -> list[dict]:
+def _official_calculator_stats(official: dict, defs: dict[str, dict]) -> list[dict]:
+    """Convert the current EXBO tooltip ranges into calculator stat rows.
+
+    The official item record is authoritative for base ranges, sign/color and
+    display units. Normalized data is used only to fill missing display metadata.
+    """
+    out: list[dict] = []
+    for stat in official.get("stats") or []:
+        if stat.get("kind") != "range":
+            continue
+        key = str(stat.get("key") or "")
+        if not key or "artefact_properties.factor" not in key or stat.get("min") is None or stat.get("max") is None:
+            continue
+        known = defs.get(key) or {}
+        display = str(stat.get("display") or "")
+        out.append({
+            "key": key,
+            "name": stat.get("name") or known.get("name") or key.rsplit(".", 1)[-1].replace("_", " ").title(),
+            "min": float(stat.get("min")),
+            "max": float(stat.get("max")),
+            "isPositive": not bool(stat.get("harmful", False)),
+            "isPercentage": "%" in display if display else bool(known.get("isPercentage", False)),
+            "officialDisplay": display,
+            "origin": "artefact",
+        })
+    return out
+
+
+def _official_special_stats(official: dict) -> list[dict]:
+    """Keep triggered/mechanic rows visible without adding them to build totals."""
+    out: list[dict] = []
+    for stat in official.get("stats") or []:
+        if stat.get("group") != "Special Mechanics":
+            continue
+        row = {
+            "key": stat.get("key") or "",
+            "name": stat.get("name") or "Special mechanic",
+            "display": stat.get("display") or "",
+            "kind": stat.get("kind") or "numeric",
+            "harmful": bool(stat.get("harmful", False)),
+        }
+        for field in ("min", "max", "value"):
+            if stat.get(field) is not None:
+                row[field] = stat.get(field)
+        out.append(row)
+    return out
+
+
+def _merge_stat_metadata(stats: list[dict], defs: dict[str, dict], official: dict) -> list[dict]:
+    """Fallback only for artifacts absent from the current official range parser."""
     out = []
+    official_stats = _official_stats_by_name(official)
+    official_by_key = _official_stats_by_key(official)
     for stat in stats:
         row = dict(stat)
         key = str(row.get("key") or "")
         known = defs.get(key) or {}
         if known:
-            # Current EXBO values and sign classification win; legacy metadata
-            # is used only for display names/units missing from newer exports.
             row["name"] = known.get("name") or row.get("name")
             row["isPercentage"] = bool(known.get("isPercentage", row.get("isPercentage", False)))
+        current = official_by_key.get(key) or official_stats.get(str(row.get("name") or "").strip().lower()) or {}
+        if current:
+            row["isPositive"] = not bool(current.get("harmful", False))
+            display = str(current.get("display") or "")
+            if display:
+                row["isPercentage"] = "%" in display
+                row["officialDisplay"] = display
         row["origin"] = "artefact"
         out.append(row)
     return out
@@ -111,6 +167,14 @@ def _official_stats_by_name(official: dict) -> dict[str, dict]:
         str(row.get("name") or "").strip().lower(): row
         for row in official.get("stats") or []
         if row.get("name")
+    }
+
+
+def _official_stats_by_key(official: dict) -> dict[str, dict]:
+    return {
+        str(row.get("key") or ""): row
+        for row in official.get("stats") or []
+        if row.get("key")
     }
 
 
@@ -163,6 +227,7 @@ def _fallback_artifact(item_id: str, official: dict, stat_defs: dict[str, dict])
         "level": 0,
         "quality": 100,
         "stats": stats,
+        "specialStats": _official_special_stats(official),
         "additionalStats": [],
         "icon_url": official.get("icon_url"),
         "artifact_class": official.get("artifact_class") or "Artifact",
@@ -195,6 +260,8 @@ async def build_calculator_data():
         if source_rows:
             current = _level_zero_row(source_rows)
             old = legacy.get(item_id) or {}
+            official_stats = _official_calculator_stats(official, stat_defs)
+            stats = official_stats or _merge_stat_metadata(current.get("stats") or [], stat_defs, official)
             artifacts.append({
                 "id": item_id,
                 "name": official.get("item_name") or current.get("name") or item_id,
@@ -202,12 +269,13 @@ async def build_calculator_data():
                 "rarity": old.get("rarity") or "rarity.ordinary",
                 "level": 0,
                 "quality": 100,
-                "stats": _merge_stat_metadata(current.get("stats") or [], stat_defs),
+                "stats": stats,
+                "specialStats": _official_special_stats(official),
                 "additionalStats": old.get("additionalStats") or [],
                 "icon_url": official.get("icon_url"),
                 "artifact_class": official.get("artifact_class") or str(current.get("category") or "").split("/")[-1].replace("_", " ").title(),
                 "description": official.get("description") or "",
-                "calculator_source": "current EXBO-normalized +0 ranges",
+                "calculator_source": "current official EXBO base ranges" if official_stats else "normalized fallback ranges",
             })
         else:
             try:
@@ -226,6 +294,7 @@ async def build_calculator_data():
                     "level": 0,
                     "quality": 100,
                     "stats": [],
+                    "specialStats": _official_special_stats(official),
                     "additionalStats": [],
                     "icon_url": official.get("icon_url"),
                     "artifact_class": official.get("artifact_class") or "Artifact",
@@ -241,7 +310,7 @@ async def build_calculator_data():
     return {
         "artifacts": artifacts,
         "containers": containers,
-        "source": "current EXBO-normalized artifact ranges + official catalog metadata",
+        "source": "current official EXBO artifact ranges + legacy optional-trait metadata",
         "license": "MIT",
         "updated_at": time.time(),
     }

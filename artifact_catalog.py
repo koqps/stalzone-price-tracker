@@ -7,7 +7,9 @@ invent artifact stats or prices.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
+import urllib.request
 from typing import Any
 
 from live_ingestion import REALM, get_db_lookup
@@ -18,6 +20,12 @@ _ICON_BASE = "https://raw.githubusercontent.com/EXBO-Studio/stalzone-database/ma
 _catalog_cache: dict[str, dict[str, Any]] = {}
 _catalog_loaded_at = 0.0
 _catalog_lock = asyncio.Lock()
+
+
+def _download_json(url: str) -> Any:
+    req = urllib.request.Request(url, headers={"User-Agent": "stalzone-price-tracker/2.0"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 QUALITY_NAMES = {
     0: "Common",
@@ -111,7 +119,7 @@ def _extract_stats(item: dict[str, Any]) -> list[dict[str, Any]]:
             formatted = element.get("formatted") or {}
             display = _line(formatted.get("value"))
             color = str(formatted.get("valueColor") or formatted.get("nameColor") or "").upper()
-            harmful = color.startswith(("C1", "C2", "D", "E")) and not display.strip().startswith("-")
+            harmful = color.startswith(("C1", "C2", "D", "E"))
 
             # Artifact gameplay stats live under stalker artifact-property keys.
             key_obj = element.get("name") or {}
@@ -121,6 +129,7 @@ def _extract_stats(item: dict[str, Any]) -> list[dict[str, Any]]:
                 continue
 
             row: dict[str, Any] = {
+                "key": key,
                 "name": name,
                 "display": display,
                 "group": _stat_group(name, harmful),
@@ -171,12 +180,26 @@ async def load_artifact_catalog(force: bool = False) -> dict[str, dict[str, Any]
         if _catalog_cache and not force and now - _catalog_loaded_at < CATALOG_TTL_SECONDS:
             return _catalog_cache
 
-        lookup = get_db_lookup()
-        all_items = await lookup.get_all(realm=REALM)
+        lookup = None
         listing: list[tuple[str, dict[str, Any]]] = []
-        for item_id, entry in all_items.items():
-            data_path = str(entry.get("data") or "")
-            if "/items/artefact/" in data_path.lower():
+        try:
+            lookup = get_db_lookup()
+            all_items = await lookup.get_all(realm=REALM)
+            for item_id, entry in all_items.items():
+                data_path = str(entry.get("data") or "")
+                if "/items/artefact/" in data_path.lower():
+                    listing.append((item_id, entry))
+        except Exception:
+            # scapi can start before its local database index is hydrated. The
+            # canonical repository listing is a safe read-only fallback.
+            raw_listing = await asyncio.to_thread(
+                _download_json, f"{_ICON_BASE}/{REALM}/listing.json"
+            )
+            for entry in raw_listing if isinstance(raw_listing, list) else []:
+                data_path = str(entry.get("data") or "")
+                if "/items/artefact/" not in data_path.lower():
+                    continue
+                item_id = data_path.rsplit("/", 1)[-1].removesuffix(".json")
                 listing.append((item_id, entry))
 
         semaphore = asyncio.Semaphore(10)
@@ -187,12 +210,20 @@ async def load_artifact_catalog(force: bool = False) -> dict[str, dict[str, Any]
             name = _line(name_obj) or item_id
             item: dict[str, Any] = {}
             async with semaphore:
-                try:
-                    item = await lookup.item_info(path=data_path, realm=REALM)
-                except Exception:
-                    item = {}
+                if lookup is not None:
+                    try:
+                        item = await lookup.item_info(path=data_path, realm=REALM)
+                    except Exception:
+                        item = {}
+                if not item and data_path:
+                    try:
+                        item = await asyncio.to_thread(
+                            _download_json, f"{_ICON_BASE}/{REAL]}/{data_path}"
+                        )
+                    except Exception:
+                        item = {}
 
-            icon_path = _icon_path(data_path)
+            icon_path = str(entry.get("icon") or "").strip("/") or _icon_path(data_path)
             stats = _extract_stats(item)
             groups = sorted({s["group"] for s in stats})
             return item_id, {

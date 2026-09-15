@@ -232,6 +232,29 @@ def market(region: str = "na", live_minutes: int = 20, sale_days: int = 7):
     return sorted(out, key=lambda r: (r["item_name"].lower(), r["qlt"], r["upgrade_level"]))
 
 
+@app.get("/api/price-history")
+def price_history(item_id: str, region: str = "na", hours: int = 24, qlt: int | None = None, upgrade_level: int | None = None):
+    """Return bounded official completed-sale history for the chart UI."""
+    hours = max(1, min(int(hours), 24 * 90))
+    since = time.time() - hours * 3600
+    sql = (
+        "SELECT item_id,item_name,qlt,upgrade_level,unit_price,amount,observed_at "
+        "FROM sale_observation WHERE region=? AND item_id=? AND observed_at>=? "
+        "AND source='official_history' AND unit_price>0 AND upgrade_level BETWEEN 0 AND 15"
+    )
+    args: list[object] = [region, item_id, since]
+    if qlt is not None:
+        sql += " AND qlt=?"
+        args.append(int(qlt))
+    if upgrade_level is not None:
+        sql += " AND upgrade_level=?"
+        args.append(int(upgrade_level))
+    sql += " ORDER BY observed_at ASC LIMIT 5000"
+    with db._conn() as conn:
+        rows = [dict(r) for r in conn.execute(sql, tuple(args)).fetchall()]
+    return {"item_id": item_id, "region": region, "hours": hours, "rows": rows}
+
+
 @app.get("/api/artifacts")
 async def artifacts():
     catalog = await load_artifact_catalog()
