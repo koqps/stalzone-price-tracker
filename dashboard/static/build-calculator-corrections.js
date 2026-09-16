@@ -1,7 +1,11 @@
 (()=>{
-// Ported from will-bot2026/stalcraft_v1 packages/stalcraft-core/src/index.ts.
-// This corrects artifact quality/rarity interpolation and container/EHP math
-// without changing the calculator UI or market-price selection code.
+// Ported from will-bot2026/stalcraft_v1 packages/stalcraft-core/src/index.ts
+// and packages/stalcraft-market/src/pricing-helpers.ts.
+// Corrects quality brackets, artifact interpolation, container effects and EHP.
+if(Array.isArray(RARITIES)){
+  const common=RARITIES.find(r=>Number(r.qlt)===0);if(common){common.min=85;common.max=100;common.def=100}
+  if(!RARITIES.some(r=>Number(r.qlt)===6))RARITIES.push({qlt:6,name:'Unique',key:'rarity.unique',min:175,max:190,def:190,color:'#ef78c8'});
+}
 const QUALITY_RARITY_KEYS={
   0:'rarity.ordinary',
   1:'rarity.unordinary',
