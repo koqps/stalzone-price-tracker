@@ -12,7 +12,8 @@ const QUALITY={
   6:{name:'Unique',min:175,max:190,color:'#ef78c8',key:'rarity.unique'}
 };
 const RARITY_INDEX={'rarity.unordinary':0,'rarity.special':1,'rarity.rare':2,'rarity.exclusive':3,'rarity.legendary':4,'rarity.unique':5};
-const refState={artifacts:[],market:[],opportunities:[],stateMode:'all',minProfit:0,minRoi:0,method:'median'};
+const refState={artifacts:[],market:[],opportunities:[],stateMode:'all',minProfit:0,minRoi:0,method:'median',variantCache:new Map(),variantPending:new Map()};
+let variantObserver=null;
 
 function style(){
   const s=document.createElement('style');
@@ -41,23 +42,21 @@ function opportunityMetrics(row){
 function bestOpportunity(itemId){const rows=refState.opportunities.filter(r=>r.item_id===itemId).map(row=>({row,metrics:opportunityMetrics(row)})).filter(x=>x.metrics);rows.sort((a,b)=>b.metrics.profit-a.metrics.profit||b.metrics.roi-a.metrics.roi);return rows[0]||null}
 function passesReferenceFilters(itemId){const rows=marketRows(itemId),best=bestOpportunity(itemId);if(refState.stateMode==='live'&&!rows.some(r=>Number(r.live_listings||0)>0||Number(r.live_floor||0)>0))return false;if(refState.stateMode==='sales'&&!rows.some(r=>Number(r.sale_count||0)>0))return false;if(refState.minProfit>0&&(!best||best.metrics.profit<refState.minProfit))return false;if(refState.minRoi>0&&(!best||best.metrics.roi<refState.minRoi))return false;return true}
 function addProfitStrip(card,itemId){card.querySelector('.reference-profit-strip')?.remove();const best=bestOpportunity(itemId);if(!best||best.metrics.profit<=0)return;const strip=document.createElement('div');strip.className='reference-profit-strip';strip.innerHTML=`<div class="cost"><small>Cost</small><b>${money(best.metrics.buy)}</b></div><div class="target"><small>Target price</small><b>${money(best.metrics.target)}</b></div><div class="profit"><small>Profit</small><b>+${money(best.metrics.profit)} (${Math.round(best.metrics.roi)}%)</b></div>`;const footer=card.querySelector('.card-footer');card.insertBefore(strip,footer||null)}
-function negativeValue(stat,quality,qlt){
-  const a=Number(stat.min||0),b=Number(stat.max||0);let max=Math.max(a,b),min=Math.min(a,b);if(a<=0&&b<=0){max=Math.min(a,b);min=Math.max(a,b)}
-  const key=QUALITY[qlt]?.key||'rarity.ordinary';
-  if(quality<=100){if(quality===100&&key==='rarity.unordinary'){const start=.9*max;return start+((max-start)/100)*((quality-100)*10)}return min+((max-min)/100)*quality}
-  const ri=RARITY_INDEX[key]??Math.floor((quality-100)/15),band=Math.max(0,Math.min(ri,5)),progress=Math.max(0,Math.min(quality-(100+15*band),15))/15,start=.85*max;return start+(max-start)*progress;
-}
-function statRange(stat,row){
-  if(!row||stat.kind!=='range')return stat.display||'';const tier=QUALITY[Number(row.qlt)]||QUALITY[0],level=Math.max(0,Math.min(15,Number(row.upgrade_level||0)));let lo,hi;
-  if(stat.harmful){lo=negativeValue(stat,tier.min,Number(row.qlt));hi=negativeValue(stat,tier.max,Number(row.qlt))}
-  else{const a=Number(stat.min||0),b=Number(stat.max||0),baseMax=(a<=0&&b<=0)?Math.min(a,b):Math.max(a,b),factor=1+level*.02;lo=baseMax*(tier.min/100)*factor;hi=baseMax*(tier.max/100)*factor}
-  const min=Math.min(lo,hi),max=Math.max(lo,hi),pct=String(stat.display||'').includes('%');const f=n=>{const v=Math.round(n*100)/100;return`${v>0?'+':''}${v.toLocaleString(undefined,{maximumFractionDigits:2})}${pct?'%':''}`};return`[${f(min)}; ${f(max)}]`;
-}
+function fullQualityEndpoint(stat){const a=Number(stat.min||0),b=Number(stat.max||0);return Math.abs(a)>=Math.abs(b)?a:b}
+function rangeFromEndpoint(endpoint,row){const tier=QUALITY[Number(row?.qlt)]||QUALITY[0],a=endpoint*(tier.min/100),b=endpoint*(tier.max/100),pct=false;return{min:Math.min(a,b),max:Math.max(a,b),tier}}
+function formatRange(stat,range){const pct=String(stat.display||'').includes('%');const f=n=>{const v=Math.round(n*100)/100;return`${v>0?'+':''}${v.toLocaleString(undefined,{maximumFractionDigits:2})}${pct?'%':''}`};return`[${f(range.min)}; ${f(range.max)}]`}
+function fallbackStatRange(stat,row){if(!row||stat.kind!=='range')return stat.display||'';const endpoint=fullQualityEndpoint(stat)*(1+Math.max(0,Math.min(15,Number(row.upgrade_level||0)))*.02);return formatRange(stat,rangeFromEndpoint(endpoint,row))}
+function exactKey(itemId,level){return`${itemId}|${Number(level||0)}`}
+async function exactArtifact(itemId,level){const key=exactKey(itemId,level);if(refState.variantCache.has(key))return refState.variantCache.get(key);if(refState.variantPending.has(key))return refState.variantPending.get(key);const task=get(`/artifacts/${encodeURIComponent(itemId)}?upgrade_level=${Number(level||0)}`).then(data=>{refState.variantCache.set(key,data);return data}).catch(e=>{console.warn('exact marketplace variant unavailable',itemId,level,e);return null}).finally(()=>refState.variantPending.delete(key));refState.variantPending.set(key,task);return task}
+function renderCardStats(card,stats,row){const chips=[...card.querySelectorAll('.stat-chip')];(stats||[]).slice(0,4).forEach((st,i)=>{const chip=chips[i];if(!chip)return;const b=chip.querySelector('b');if(!b)return;const range=rangeFromEndpoint(fullQualityEndpoint(st),row);b.textContent=formatRange(st,range);chip.title=`Official EXBO +${row.upgrade_level} · ${(QUALITY[Number(row.qlt)]||QUALITY[0]).name}`})}
+async function loadCardExact(card,itemId){const row=selectedMarketRow(itemId);if(!row||!card.isConnected)return;const token=exactKey(itemId,row.upgrade_level);card.dataset.variantToken=token;const exact=await exactArtifact(itemId,row.upgrade_level);if(!exact||!card.isConnected||card.dataset.variantToken!==token)return;renderCardStats(card,exact.stats||[],row)}
+function scheduleCardExact(card,itemId){if(!variantObserver){variantObserver=new IntersectionObserver(entries=>{for(const entry of entries){if(!entry.isIntersecting)continue;variantObserver.unobserve(entry.target);const id=entry.target.dataset.refItem;if(id)loadCardExact(entry.target,id)}},{rootMargin:'240px 0px'})}card.dataset.refItem=itemId;variantObserver.observe(card)}
 function patchCardVariant(card,itemId){
   const row=selectedMarketRow(itemId),artifact=refState.artifacts.find(a=>a.item_id===itemId);if(!row||!artifact)return;
   const tier=QUALITY[Number(row.qlt)];if(tier){const badge=card.querySelector('.badge.rarity');if(badge){badge.textContent=tier.name;badge.style.setProperty('--rarity',tier.color)}}
-  const chips=[...card.querySelectorAll('.stat-chip')];(artifact.stats||[]).slice(0,4).forEach((st,i)=>{const chip=chips[i];if(!chip)return;const b=chip.querySelector('b');if(b)b.textContent=statRange(st,row);chip.title=`${tier?.name||'Quality'} ${tier?.min??''}–${tier?.max??''} · +${row.upgrade_level}`});
+  const chips=[...card.querySelectorAll('.stat-chip')];(artifact.stats||[]).slice(0,4).forEach((st,i)=>{const chip=chips[i];if(!chip)return;const b=chip.querySelector('b');if(b)b.textContent=fallbackStatRange(st,row);chip.title=`Loading official EXBO +${row.upgrade_level} values…`});scheduleCardExact(card,itemId);
 }
+async function patchDetailExact(itemId){const row=selectedMarketRow(itemId);if(!row)return;const exact=await exactArtifact(itemId,row.upgrade_level);if(!exact)return;const modal=$('detail-content');if(!modal)return;const rows=[...modal.querySelectorAll('.detail-stat')];(exact.stats||[]).forEach((st,i)=>{const el=rows[i];if(!el)return;const b=el.querySelector('b');if(!b)return;b.textContent=formatRange(st,rangeFromEndpoint(fullQualityEndpoint(st),row));b.title=`Official EXBO +${row.upgrade_level} ${(QUALITY[Number(row.qlt)]||QUALITY[0]).name}`})}
 function applyReferenceFilters(){const grid=$('artifact-grid');if(!grid)return;const cards=[...grid.querySelectorAll('.artifact-card')];let shown=0;for(const card of cards){const id=rowItemId(card),ok=!id||passesReferenceFilters(id);card.classList.toggle('ref-hidden',!ok);if(id){addProfitStrip(card,id);patchCardVariant(card,id)}if(ok)shown++}const count=$('result-count');if(count&&cards.length)count.textContent=`${shown} artifact${shown===1?'':'s'}`}
 function populateArtifactSelect(){const sel=$('reference-artifact');if(!sel)return;const current=sel.value;sel.innerHTML='<option value="">All artifacts</option>'+[...refState.artifacts].sort((a,b)=>String(a.item_name).localeCompare(String(b.item_name))).map(a=>`<option value="${String(a.item_id).replaceAll('"','&quot;')}">${String(a.item_name)}</option>`).join('');if([...sel.options].some(o=>o.value===current))sel.value=current}
 function ensureUniqueFilter(){const rarity=$('rarity-filter');if(rarity&&![...rarity.options].some(o=>o.value==='6'))rarity.add(new Option('Unique','6'))}
@@ -70,5 +69,5 @@ function buildControls(){
 async function loadReferenceData(){try{const [arts,market,ops]=await Promise.all([get('/artifacts'),get('/market?region=na'),get('/opportunities?region=na&min_profit=0&min_roi=0&limit=500')]);refState.artifacts=arts||[];refState.market=market||[];refState.opportunities=ops||[];ensureUniqueFilter();populateArtifactSelect();applyReferenceFilters()}catch(e){console.warn('reference controls data load failed',e)}}
 function observeGrid(){const grid=$('artifact-grid');if(!grid)return;new MutationObserver(()=>queueMicrotask(applyReferenceFilters)).observe(grid,{childList:true})}
 function wireDedicatedAuth(){const auth=$('auth-button');if(!auth)return;auth.addEventListener('click',e=>{if(($('auth-button-label')?.textContent||'').trim().toLowerCase()==='login'){e.preventDefault();e.stopImmediatePropagation();location.href='/login'}},true)}
-function init(){style();buildControls();observeGrid();wireDedicatedAuth();ensureUniqueFilter();loadReferenceData();setInterval(()=>loadReferenceData(),60000)}
+function init(){style();buildControls();observeGrid();wireDedicatedAuth();ensureUniqueFilter();document.addEventListener('click',e=>{const b=e.target.closest?.('[data-detail]');if(b?.dataset.detail)setTimeout(()=>patchDetailExact(b.dataset.detail),0)},true);loadReferenceData();setInterval(()=>loadReferenceData(),60000)}
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
