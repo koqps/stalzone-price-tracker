@@ -2,12 +2,22 @@ const API='/api';
 const $=id=>document.getElementById(id);
 const q=s=>document.querySelector(s);
 const qa=s=>[...document.querySelectorAll(s)];
+const QUALITY={
+  0:{name:'Common',min:85,max:100,color:'#8b8f86',key:'rarity.ordinary'},
+  1:{name:'Uncommon',min:100,max:115,color:'#79b84b',key:'rarity.unordinary'},
+  2:{name:'Special',min:115,max:130,color:'#4f98d1',key:'rarity.special'},
+  3:{name:'Rare',min:130,max:145,color:'#9a63d8',key:'rarity.rare'},
+  4:{name:'Exclusive',min:145,max:160,color:'#e05252',key:'rarity.exclusive'},
+  5:{name:'Legendary',min:160,max:175,color:'#e6a33c',key:'rarity.legendary'},
+  6:{name:'Unique',min:175,max:190,color:'#ef78c8',key:'rarity.unique'}
+};
+const RARITY_INDEX={'rarity.unordinary':0,'rarity.special':1,'rarity.rare':2,'rarity.exclusive':3,'rarity.legendary':4,'rarity.unique':5};
 const refState={artifacts:[],market:[],opportunities:[],stateMode:'all',minProfit:0,minRoi:0,method:'median'};
 
 function style(){
   const s=document.createElement('style');
   s.textContent=`
-  .reference-filter-row{display:contents}.reference-control{display:grid;gap:4px}.reference-control label{font-size:8px;color:#728092;text-transform:uppercase;letter-spacing:.08em;font-weight:800}.reference-control select,.reference-control input{height:34px;min-width:132px;padding:0 10px;border:1px solid #263445;border-radius:7px;background:#111923;color:#dce6f2;outline:0;font-size:10px}.reference-control select:focus,.reference-control input:focus{border-color:#4d8de0;box-shadow:0 0 0 2px #4d8de018}.reference-control.artifact select{min-width:180px}.reference-control.money input{width:135px;min-width:110px}.reference-actions{display:flex;align-items:end;gap:7px}.reference-actions button{height:34px;border:1px solid #2a394a;background:#16212d;color:#bdcad9;border-radius:7px;padding:0 11px;font-size:9px;font-weight:750;cursor:pointer;white-space:nowrap}.reference-actions button:hover{border-color:#4a76a5;color:white}.reference-actions .primary{background:#4f83d8;border-color:#5a94ee;color:#fff}.reference-profit-fields{display:contents}.reference-profit-fields.is-collapsed{display:none}.filter-bar.reference-ready{align-items:end;flex-wrap:wrap}.filter-bar.reference-ready .filter-spacer{display:none}.filter-bar.reference-ready .result-count{margin-left:auto}.ref-hidden{display:none!important}.reference-profit-strip{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin:0 13px 10px}.reference-profit-strip>div{padding:7px 8px;border:1px solid #22303d;background:#0d141b;border-radius:7px}.reference-profit-strip small{display:block;color:#69798b;font-size:7px;text-transform:uppercase;letter-spacing:.07em}.reference-profit-strip b{display:block;margin-top:3px;font-size:10px}.reference-profit-strip .profit b{color:#59d693}.reference-profit-strip .cost b{color:#ef777d}.reference-profit-strip .target b{color:#e8f1fb}@media(max-width:950px){.reference-control.artifact,.reference-control,.reference-control select,.reference-control input{min-width:0;width:100%}.filter-bar.reference-ready{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.reference-actions{grid-column:1/-1;flex-wrap:wrap}.filter-bar.reference-ready .result-count{margin-left:0}}
+  .reference-filter-row{display:contents}.reference-control{display:grid;gap:4px}.reference-control label{font-size:8px;color:#728092;text-transform:uppercase;letter-spacing:.08em;font-weight:800}.reference-control select,.reference-control input{height:34px;min-width:132px;padding:0 10px;border:1px solid #263445;border-radius:7px;background:#111923;color:#dce6f2;outline:0;font-size:10px}.reference-control select:focus,.reference-control input:focus{border-color:#4d8de0;box-shadow:0 0 0 2px #4d8de018}.reference-control.artifact select{min-width:180px}.reference-control.money input{width:135px;min-width:110px}.reference-actions{display:flex;align-items:end;gap:7px}.reference-actions button{height:34px;border:1px solid #2a394a;background:#16212d;color:#bdcad9;border-radius:7px;padding:0 11px;font-size:9px;font-weight:750;cursor:pointer;white-space:nowrap}.reference-actions button:hover{border-color:#4a76a5;color:white}.reference-actions .primary{background:#4f83d8;border-color:#5a94ee;color:#fff}.reference-profit-fields{display:contents}.reference-profit-fields.is-collapsed{display:none}.filter-bar.reference-ready{align-items:end;flex-wrap:wrap}.filter-bar.reference-ready .filter-spacer{display:none}.filter-bar.reference-ready .result-count{margin-left:auto}.ref-hidden{display:none!important}.reference-profit-strip{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin:0 13px 10px}.reference-profit-strip>div{padding:7px 8px;border:1px solid #22303d;background:#0d141b;border-radius:7px}.reference-profit-strip small{display:block;color:#69798b;font-size:7px;text-transform:uppercase;letter-spacing:.07em}.reference-profit-strip b{display:block;margin-top:3px;font-size:10px}.reference-profit-strip .profit b{color:#59d693}.reference-profit-strip .cost b{color:#ef777d}.reference-profit-strip .target b{color:#e8f1fb}.stat-chip b{font-variant-numeric:tabular-nums}@media(max-width:950px){.reference-control.artifact,.reference-control,.reference-control select,.reference-control input{min-width:0;width:100%}.filter-bar.reference-ready{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.reference-actions{grid-column:1/-1;flex-wrap:wrap}.filter-bar.reference-ready .result-count{margin-left:0}}
   `;
   document.head.appendChild(s);
 }
@@ -16,89 +26,49 @@ function fire(el,type='change'){el.dispatchEvent(new Event(type,{bubbles:true}))
 function money(n){return Number.isFinite(Number(n))?`${Math.round(Number(n)).toLocaleString()} ₽`:'—'}
 function rowItemId(card){return card.querySelector('[data-history]')?.dataset.history||card.querySelector('[data-detail]')?.dataset.detail||''}
 function marketRows(itemId){return refState.market.filter(r=>r.item_id===itemId)}
+function selectedMarketRow(itemId){
+  let rows=marketRows(itemId);const rf=$('rarity-filter')?.value??'',lf=$('level-filter')?.value??'';
+  if(rf!=='')rows=rows.filter(r=>Number(r.qlt)===Number(rf));
+  if(lf!=='')rows=rows.filter(r=>Number(r.upgrade_level)===Number(lf));
+  return rows.sort((a,b)=>Number(a.live_floor??Infinity)-Number(b.live_floor??Infinity)||Number(b.sale_count||0)-Number(a.sale_count||0))[0]||null;
+}
 function opportunityMetrics(row){
-  if(!row)return null;
-  const buy=Number(row.buy_price||0),tax=Number(row.tax_rate??.05);
-  let target;
-  if(refState.method==='live')target=Number(row.next_live_price||row.resale_target||0);
-  else target=Number(row.sale_median||row.resale_target||0);
+  if(!row)return null;const buy=Number(row.buy_price||0),tax=Number(row.tax_rate??.05);
+  const target=Number(refState.method==='live'?(row.next_live_price||row.resale_target||0):(row.sale_median||row.resale_target||0));
   if(!(buy>0&&target>0))return{profit:Number(row.estimated_profit||0),roi:Number(row.roi_pct||0),buy,target:Number(row.resale_target||0)};
-  const profit=target*(1-tax)-buy;
-  return{buy,target,profit,roi:buy?profit/buy*100:0};
+  const profit=target*(1-tax)-buy;return{buy,target,profit,roi:buy?profit/buy*100:0};
 }
-function bestOpportunity(itemId){
-  const rows=refState.opportunities.filter(r=>r.item_id===itemId).map(row=>({row,metrics:opportunityMetrics(row)})).filter(x=>x.metrics);
-  rows.sort((a,b)=>b.metrics.profit-a.metrics.profit||b.metrics.roi-a.metrics.roi);
-  return rows[0]||null;
+function bestOpportunity(itemId){const rows=refState.opportunities.filter(r=>r.item_id===itemId).map(row=>({row,metrics:opportunityMetrics(row)})).filter(x=>x.metrics);rows.sort((a,b)=>b.metrics.profit-a.metrics.profit||b.metrics.roi-a.metrics.roi);return rows[0]||null}
+function passesReferenceFilters(itemId){const rows=marketRows(itemId),best=bestOpportunity(itemId);if(refState.stateMode==='live'&&!rows.some(r=>Number(r.live_listings||0)>0||Number(r.live_floor||0)>0))return false;if(refState.stateMode==='sales'&&!rows.some(r=>Number(r.sale_count||0)>0))return false;if(refState.minProfit>0&&(!best||best.metrics.profit<refState.minProfit))return false;if(refState.minRoi>0&&(!best||best.metrics.roi<refState.minRoi))return false;return true}
+function addProfitStrip(card,itemId){card.querySelector('.reference-profit-strip')?.remove();const best=bestOpportunity(itemId);if(!best||best.metrics.profit<=0)return;const strip=document.createElement('div');strip.className='reference-profit-strip';strip.innerHTML=`<div class="cost"><small>Cost</small><b>${money(best.metrics.buy)}</b></div><div class="target"><small>Target price</small><b>${money(best.metrics.target)}</b></div><div class="profit"><small>Profit</small><b>+${money(best.metrics.profit)} (${Math.round(best.metrics.roi)}%)</b></div>`;const footer=card.querySelector('.card-footer');card.insertBefore(strip,footer||null)}
+function negativeValue(stat,quality,qlt){
+  const a=Number(stat.min||0),b=Number(stat.max||0);let max=Math.max(a,b),min=Math.min(a,b);if(a<=0&&b<=0){max=Math.min(a,b);min=Math.max(a,b)}
+  const key=QUALITY[qlt]?.key||'rarity.ordinary';
+  if(quality<=100){if(quality===100&&key==='rarity.unordinary'){const start=.9*max;return start+((max-start)/100)*((quality-100)*10)}return min+((max-min)/100)*quality}
+  const ri=RARITY_INDEX[key]??Math.floor((quality-100)/15),band=Math.max(0,Math.min(ri,5)),progress=Math.max(0,Math.min(quality-(100+15*band),15))/15,start=.85*max;return start+(max-start)*progress;
 }
-function passesReferenceFilters(itemId){
-  const rows=marketRows(itemId),best=bestOpportunity(itemId);
-  if(refState.stateMode==='live'&&!rows.some(r=>Number(r.live_listings||0)>0||Number(r.live_floor||0)>0))return false;
-  if(refState.stateMode==='sales'&&!rows.some(r=>Number(r.sale_count||0)>0))return false;
-  if(refState.minProfit>0&&(!best||best.metrics.profit<refState.minProfit))return false;
-  if(refState.minRoi>0&&(!best||best.metrics.roi<refState.minRoi))return false;
-  return true;
+function statRange(stat,row){
+  if(!row||stat.kind!=='range')return stat.display||'';const tier=QUALITY[Number(row.qlt)]||QUALITY[0],level=Math.max(0,Math.min(15,Number(row.upgrade_level||0)));let lo,hi;
+  if(stat.harmful){lo=negativeValue(stat,tier.min,Number(row.qlt));hi=negativeValue(stat,tier.max,Number(row.qlt))}
+  else{const a=Number(stat.min||0),b=Number(stat.max||0),baseMax=(a<=0&&b<=0)?Math.min(a,b):Math.max(a,b),factor=1+level*.02;lo=baseMax*(tier.min/100)*factor;hi=baseMax*(tier.max/100)*factor}
+  const min=Math.min(lo,hi),max=Math.max(lo,hi),pct=String(stat.display||'').includes('%');const f=n=>{const v=Math.round(n*100)/100;return`${v>0?'+':''}${v.toLocaleString(undefined,{maximumFractionDigits:2})}${pct?'%':''}`};return`[${f(min)}; ${f(max)}]`;
 }
-function addProfitStrip(card,itemId){
-  card.querySelector('.reference-profit-strip')?.remove();
-  const best=bestOpportunity(itemId);if(!best||best.metrics.profit<=0)return;
-  const strip=document.createElement('div');strip.className='reference-profit-strip';
-  strip.innerHTML=`<div class="cost"><small>Cost</small><b>${money(best.metrics.buy)}</b></div><div class="target"><small>Target price</small><b>${money(best.metrics.target)}</b></div><div class="profit"><small>Profit</small><b>+${money(best.metrics.profit)} (${Math.round(best.metrics.roi)}%)</b></div>`;
-  const footer=card.querySelector('.card-footer');card.insertBefore(strip,footer||null);
+function patchCardVariant(card,itemId){
+  const row=selectedMarketRow(itemId),artifact=refState.artifacts.find(a=>a.item_id===itemId);if(!row||!artifact)return;
+  const tier=QUALITY[Number(row.qlt)];if(tier){const badge=card.querySelector('.badge.rarity');if(badge){badge.textContent=tier.name;badge.style.setProperty('--rarity',tier.color)}}
+  const chips=[...card.querySelectorAll('.stat-chip')];(artifact.stats||[]).slice(0,4).forEach((st,i)=>{const chip=chips[i];if(!chip)return;const b=chip.querySelector('b');if(b)b.textContent=statRange(st,row);chip.title=`${tier?.name||'Quality'} ${tier?.min??''}–${tier?.max??''} · +${row.upgrade_level}`});
 }
-function applyReferenceFilters(){
-  const grid=$('artifact-grid');if(!grid)return;
-  const cards=[...grid.querySelectorAll('.artifact-card')];let shown=0;
-  for(const card of cards){const id=rowItemId(card),ok=!id||passesReferenceFilters(id);card.classList.toggle('ref-hidden',!ok);if(id)addProfitStrip(card,id);if(ok)shown++}
-  const count=$('result-count');if(count&&cards.length)count.textContent=`${shown} artifact${shown===1?'':'s'}`;
-}
-function populateArtifactSelect(){
-  const sel=$('reference-artifact');if(!sel)return;
-  const current=sel.value;
-  sel.innerHTML='<option value="">All artifacts</option>'+[...refState.artifacts].sort((a,b)=>String(a.item_name).localeCompare(String(b.item_name))).map(a=>`<option value="${String(a.item_id).replaceAll('"','&quot;')}">${String(a.item_name)}</option>`).join('');
-  if([...sel.options].some(o=>o.value===current))sel.value=current;
-}
+function applyReferenceFilters(){const grid=$('artifact-grid');if(!grid)return;const cards=[...grid.querySelectorAll('.artifact-card')];let shown=0;for(const card of cards){const id=rowItemId(card),ok=!id||passesReferenceFilters(id);card.classList.toggle('ref-hidden',!ok);if(id){addProfitStrip(card,id);patchCardVariant(card,id)}if(ok)shown++}const count=$('result-count');if(count&&cards.length)count.textContent=`${shown} artifact${shown===1?'':'s'}`}
+function populateArtifactSelect(){const sel=$('reference-artifact');if(!sel)return;const current=sel.value;sel.innerHTML='<option value="">All artifacts</option>'+[...refState.artifacts].sort((a,b)=>String(a.item_name).localeCompare(String(b.item_name))).map(a=>`<option value="${String(a.item_id).replaceAll('"','&quot;')}">${String(a.item_name)}</option>`).join('');if([...sel.options].some(o=>o.value===current))sel.value=current}
+function ensureUniqueFilter(){const rarity=$('rarity-filter');if(rarity&&![...rarity.options].some(o=>o.value==='6'))rarity.add(new Option('Unique','6'))}
 function buildControls(){
-  const bar=q('.filter-bar');if(!bar||$('reference-artifact'))return;
-  bar.classList.add('reference-ready');
-  const block=document.createElement('div');block.className='reference-filter-row';
-  block.innerHTML=`
-    <div class="reference-control artifact"><label>Artifact name</label><select id="reference-artifact"><option value="">All artifacts</option></select></div>
-    <div class="reference-control"><label>State</label><select id="reference-state"><option value="all">All</option><option value="live">Live listings</option><option value="sales">Has sales</option></select></div>
-    <div class="reference-profit-fields" id="reference-profit-fields">
-      <div class="reference-control money"><label>Min profit</label><input id="reference-profit" type="number" min="0" step="1000" placeholder="Enter min profit"></div>
-      <div class="reference-control money"><label>Min % profit</label><input id="reference-roi" type="number" min="0" step="1" placeholder="Enter min %"></div>
-      <div class="reference-control"><label>Method</label><select id="reference-method"><option value="median">Median</option><option value="live">Live floor</option></select></div>
-    </div>
-    <div class="reference-actions"><button class="primary" id="reference-advanced">Advanced filters</button><button id="reference-clear">Clear filters</button><button id="reference-history">⌁ Price history</button></div>`;
-  bar.prepend(block);
-  $('reference-artifact').onchange=e=>{const art=refState.artifacts.find(a=>a.item_id===e.target.value);const search=$('search');if(search){search.value=art?.item_name||'';fire(search,'input')}};
-  $('reference-state').onchange=e=>{refState.stateMode=e.target.value;applyReferenceFilters()};
-  $('reference-profit').oninput=e=>{refState.minProfit=Math.max(0,Number(e.target.value||0));applyReferenceFilters()};
-  $('reference-roi').oninput=e=>{refState.minRoi=Math.max(0,Number(e.target.value||0));applyReferenceFilters()};
-  $('reference-method').onchange=e=>{refState.method=e.target.value;applyReferenceFilters()};
-  $('reference-advanced').onclick=()=>{$('reference-profit-fields').classList.toggle('is-collapsed')};
-  $('reference-clear').onclick=()=>{
-    $('reference-artifact').value='';$('reference-state').value='all';$('reference-profit').value='';$('reference-roi').value='';$('reference-method').value='median';
-    refState.stateMode='all';refState.minProfit=0;refState.minRoi=0;refState.method='median';
-    const search=$('search');if(search){search.value='';fire(search,'input')}
-    const rarity=$('rarity-filter'),level=$('level-filter'),sort=$('sort-filter');if(rarity){rarity.value='';fire(rarity)}if(level){level.value='';fire(level)}if(sort){sort.value='name';fire(sort)}
-    applyReferenceFilters();
-  };
-  $('reference-history').onclick=()=>{
-    const selected=$('reference-artifact').value;
-    let btn=selected?q(`[data-history="${CSS.escape(selected)}"]`):q('.artifact-card:not(.ref-hidden) [data-history]');
-    if(btn){btn.click();return}
-    if(selected){const art=refState.artifacts.find(a=>a.item_id===selected),search=$('search');if(search&&art){search.value=art.item_name;fire(search,'input');setTimeout(()=>q(`[data-history="${CSS.escape(selected)}"]`)?.click(),80)}}
-  };
+  const bar=q('.filter-bar');if(!bar||$('reference-artifact'))return;bar.classList.add('reference-ready');const block=document.createElement('div');block.className='reference-filter-row';block.innerHTML=`<div class="reference-control artifact"><label>Artifact name</label><select id="reference-artifact"><option value="">All artifacts</option></select></div><div class="reference-control"><label>State</label><select id="reference-state"><option value="all">All</option><option value="live">Live listings</option><option value="sales">Has sales</option></select></div><div class="reference-profit-fields" id="reference-profit-fields"><div class="reference-control money"><label>Min profit</label><input id="reference-profit" type="number" min="0" step="1000" placeholder="Enter min profit"></div><div class="reference-control money"><label>Min % profit</label><input id="reference-roi" type="number" min="0" step="1" placeholder="Enter min %"></div><div class="reference-control"><label>Method</label><select id="reference-method"><option value="median">Median</option><option value="live">Live floor</option></select></div></div><div class="reference-actions"><button class="primary" id="reference-advanced">Advanced filters</button><button id="reference-clear">Clear filters</button><button id="reference-history">⌁ Price history</button></div>`;bar.prepend(block);
+  $('reference-artifact').onchange=e=>{const art=refState.artifacts.find(a=>a.item_id===e.target.value),search=$('search');if(search){search.value=art?.item_name||'';fire(search,'input')}};$('reference-state').onchange=e=>{refState.stateMode=e.target.value;applyReferenceFilters()};$('reference-profit').oninput=e=>{refState.minProfit=Math.max(0,Number(e.target.value||0));applyReferenceFilters()};$('reference-roi').oninput=e=>{refState.minRoi=Math.max(0,Number(e.target.value||0));applyReferenceFilters()};$('reference-method').onchange=e=>{refState.method=e.target.value;applyReferenceFilters()};$('reference-advanced').onclick=()=>{$('reference-profit-fields').classList.toggle('is-collapsed')};
+  $('reference-clear').onclick=()=>{$('reference-artifact').value='';$('reference-state').value='all';$('reference-profit').value='';$('reference-roi').value='';$('reference-method').value='median';refState.stateMode='all';refState.minProfit=0;refState.minRoi=0;refState.method='median';const search=$('search');if(search){search.value='';fire(search,'input')}const rarity=$('rarity-filter'),level=$('level-filter'),sort=$('sort-filter');if(rarity){rarity.value='';fire(rarity)}if(level){level.value='';fire(level)}if(sort){sort.value='name';fire(sort)}applyReferenceFilters()};
+  $('reference-history').onclick=()=>{const selected=$('reference-artifact').value;let btn=selected?q(`[data-history="${CSS.escape(selected)}"]`):q('.artifact-card:not(.ref-hidden) [data-history]');if(btn){btn.click();return}if(selected){const art=refState.artifacts.find(a=>a.item_id===selected),search=$('search');if(search&&art){search.value=art.item_name;fire(search,'input');setTimeout(()=>q(`[data-history="${CSS.escape(selected)}"]`)?.click(),80)}}};
 }
-async function loadReferenceData(){
-  try{
-    const [arts,market,ops]=await Promise.all([get('/artifacts'),get('/market?region=na'),get('/opportunities?region=na&min_profit=0&min_roi=0&limit=500')]);
-    refState.artifacts=arts||[];refState.market=market||[];refState.opportunities=ops||[];populateArtifactSelect();applyReferenceFilters();
-  }catch(e){console.warn('reference controls data load failed',e)}
-}
+async function loadReferenceData(){try{const [arts,market,ops]=await Promise.all([get('/artifacts'),get('/market?region=na'),get('/opportunities?region=na&min_profit=0&min_roi=0&limit=500')]);refState.artifacts=arts||[];refState.market=market||[];refState.opportunities=ops||[];ensureUniqueFilter();populateArtifactSelect();applyReferenceFilters()}catch(e){console.warn('reference controls data load failed',e)}}
 function observeGrid(){const grid=$('artifact-grid');if(!grid)return;new MutationObserver(()=>queueMicrotask(applyReferenceFilters)).observe(grid,{childList:true,subtree:true})}
-function wireDedicatedAuth(){const auth=$('auth-button');if(!auth)return;auth.addEventListener('click',e=>{if(($('auth-button-label')?.textContent||'').trim().toLowerCase()==='login'){e.preventDefault();e.stopImmediatePropagation();location.href='/static/login.html'}},true)}
-function init(){style();buildControls();observeGrid();wireDedicatedAuth();loadReferenceData();setInterval(()=>loadReferenceData(),60000)}
+function wireDedicatedAuth(){const auth=$('auth-button');if(!auth)return;auth.addEventListener('click',e=>{if(($('auth-button-label')?.textContent||'').trim().toLowerCase()==='login'){e.preventDefault();e.stopImmediatePropagation();location.href='/login'}},true)}
+function init(){style();buildControls();observeGrid();wireDedicatedAuth();ensureUniqueFilter();loadReferenceData();setInterval(()=>loadReferenceData(),60000)}
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
