@@ -259,8 +259,10 @@ async def artifacts():
 
 
 @app.get("/api/artifacts/{item_id}")
-async def artifact(item_id: str):
-    item = await get_artifact_metadata(item_id)
+async def artifact(item_id: str, upgrade_level: int = 0):
+    if upgrade_level < 0 or upgrade_level > 15:
+        raise HTTPException(status_code=422, detail="upgrade_level must be between 0 and 15")
+    item = await get_artifact_metadata(item_id, upgrade_level=upgrade_level)
     if not item:
         raise HTTPException(status_code=404, detail="Artifact not found")
     return item
