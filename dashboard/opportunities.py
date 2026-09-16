@@ -45,19 +45,17 @@ def opportunities(
     limit: int = Query(500, ge=1, le=1500),
 ):
     now = time.time()
-    # Twenty minutes is only the candidate pool. Per exact market we then keep
-    # rows from its most recent scan window, so old lots are not called current.
     snapshot_since = now - 20 * 60
     sale_since = now - sale_days * 86400
     with db._conn() as conn:
         snapshots = conn.execute(
-            "SELECT id,item_id,item_name,qlt,upgrade_level,amount,buyout_price,unit_price,lot_key,observed_at "
+            "SELECT id,item_id,item_name,qlt,ptn,upgrade_level,amount,buyout_price,unit_price,lot_key,observed_at "
             "FROM auction_snapshot WHERE region=? AND observed_at>=? AND unit_price>0 "
             "AND upgrade_level BETWEEN 0 AND 15",
             (region, snapshot_since),
         ).fetchall()
         sales = conn.execute(
-            "SELECT item_id,qlt,upgrade_level,unit_price FROM sale_observation "
+            "SELECT item_id,qlt,ptn,upgrade_level,unit_price FROM sale_observation "
             "WHERE region=? AND observed_at>=? AND unit_price>0 AND source='official_history' "
             "AND upgrade_level BETWEEN 0 AND 15",
             (region, sale_since),
@@ -69,10 +67,8 @@ def opportunities(
 
     by_market = defaultdict(list)
     for row in snapshots:
-        by_market[(row["item_id"], int(row["qlt"]), int(row["upgrade_level"]))].append(row)
+        by_market[(row["item_id"], int(row["qlt"]), int(row["ptn"]), int(row["upgrade_level"]))].append(row)
 
-    # Keep only the most recent scan slice for each exact market and dedupe the
-    # same lot_key. This is a better approximation of lots that are still live.
     current_markets = {}
     for key, rows in by_market.items():
         latest_ts = max(float(r["observed_at"] or 0) for r in rows)
@@ -87,12 +83,12 @@ def opportunities(
 
     sale_groups = defaultdict(list)
     for row in sales:
-        sale_groups[(row["item_id"], int(row["qlt"]), int(row["upgrade_level"]))].append(float(row["unit_price"]))
+        sale_groups[(row["item_id"], int(row["qlt"]), int(row["ptn"]), int(row["upgrade_level"]))].append(float(row["unit_price"]))
 
     patch_items = {str(r["item_id"]) for r in patches if r["item_id"]}
     results = []
     for key, lots in current_markets.items():
-        item_id, qlt, level = key
+        item_id, qlt, ptn, level = key
         sold = sale_groups.get(key, [])
         sale_median = _median(sold)
         sale_count = len(sold)
@@ -108,8 +104,6 @@ def opportunities(
             anchors = []
             evidence = []
             if sale_median and sale_count >= 2:
-                # Slight haircut makes the resale estimate more conservative
-                # than blindly assuming the historical median.
                 anchors.append(sale_median * (0.97 if sale_count >= 5 else 0.94))
                 evidence.append(f"{sale_count} official {sale_days}d sales")
             if next_floor:
@@ -136,6 +130,8 @@ def opportunities(
                 "item_id": item_id,
                 "item_name": candidate["item_name"] or item_id,
                 "qlt": qlt,
+                "ptn": ptn,
+                "pattern_label": f"+{ptn}",
                 "upgrade_level": level,
                 "amount": int(candidate["amount"] or 1),
                 "buy_price": round(buy, 2),
