@@ -1,16 +1,27 @@
-"""Helpers for artifact quality and exact enhancement level.
+"""Helpers for artifact rarity, pattern/point value, and derived quality.
 
 STALZONE artifact prices are comparable only within the same artifact, rarity,
-and explicit enhancement level. +0, +1, ... +15 are all separate markets.
-The official auction API represents this enhancement level as ``additional.ptn``.
-Unknown enhancement levels are excluded rather than guessed.
+and explicit ptn value. The API's ``additional.ptn`` is the displayed +0..+15
+point/upgrade value; combined with qlt it also identifies the quality value
+inside the rarity bracket.
 """
 from __future__ import annotations
 
 from typing import Any
 
+QUALITY_BRACKETS = {
+    0: (85, 100),
+    1: (100, 115),
+    2: (115, 130),
+    3: (130, 145),
+    4: (145, 160),
+    5: (160, 175),
+    6: (175, 190),
+}
+
 
 def extract_quality(additional: dict[str, Any] | None) -> int | None:
+    """Return API qlt rarity bracket 0..6 (Common through Unique)."""
     if not additional or not isinstance(additional, dict):
         return None
     value = additional.get("qlt", additional.get("quality"))
@@ -18,16 +29,11 @@ def extract_quality(additional: dict[str, Any] | None) -> int | None:
         qlt = int(value)
     except (TypeError, ValueError):
         return None
-    return max(0, min(5, qlt))
+    return max(0, min(6, qlt))
 
 
 def extract_upgrade_level(additional: dict[str, Any] | None) -> int | None:
-    """Return the official artifact enhancement/potential level (0..15).
-
-    Official auction payloads use ``ptn``. ``upgrade_level`` and ``potential``
-    are accepted only as compatibility aliases for alternate wrappers.
-    Missing level is +0 only when there is no contradictory enhancement data.
-    """
+    """Return official artifact ptn/displayed +level (0..15)."""
     if not additional or not isinstance(additional, dict):
         return None
 
@@ -45,14 +51,21 @@ def extract_upgrade_level(additional: dict[str, Any] | None) -> int | None:
             return None
         return level if 0 <= level <= 15 else None
 
-    # The official API omits ptn for +0 on some records. Only infer +0 when no
-    # non-zero enhancement indicator is present; otherwise exclude the row.
+    # Some +0 records omit ptn. Infer +0 only when there is no contradictory
+    # enhancement information.
     bonus = additional.get("upgrade_bonus")
     if isinstance(bonus, dict):
         bonus = bonus.get("value", bonus.get("amount"))
     if bonus in (None, "", 0, 0.0, "0", "0.0"):
         return 0
     return None
+
+
+def derived_quality(qlt: int | None, ptn: int | None) -> int | None:
+    """Map qlt + ptn to the optimizer/display quality (e.g. 4+15 => 160)."""
+    if qlt not in QUALITY_BRACKETS or ptn is None or not 0 <= int(ptn) <= 15:
+        return None
+    return QUALITY_BRACKETS[int(qlt)][0] + int(ptn)
 
 
 def variant_key(level: int | None) -> float | None:
@@ -67,7 +80,6 @@ def extract_variant(additional: dict[str, Any] | None) -> tuple[int | None, int 
 
 
 def bucket_to_upgrade_level(bucket: int | float | None) -> int | None:
-    """Decode legacy level*10 compatibility buckets only."""
     if bucket is None:
         return None
     try:
