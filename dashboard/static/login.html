@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0b1016">
+<title>Sign in · StalZone Auction Tracker</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0b1016;--panel:#111821;--panel2:#172231;--line:#273649;--text:#edf4fc;--muted:#8393a7;--blue:#5a8fe8;--blue2:#76a6f4;--green:#59d693;--red:#ed737b}*{box-sizing:border-box}html,body{margin:0;min-height:100%;font-family:Inter,system-ui,sans-serif;background:var(--bg);color:var(--text)}body{min-height:100vh;background:radial-gradient(circle at 50% 44%,rgba(62,101,153,.08),transparent 28%),#0b1016}.top{height:58px;border-bottom:1px solid #202b38;background:#101720;display:flex;align-items:center;padding:0 max(22px,calc((100vw - 1160px)/2));gap:28px}.brand{display:flex;align-items:center;gap:10px;text-decoration:none;color:inherit}.mark{width:28px;height:28px;border:1px solid #4c72a1;border-radius:7px;display:grid;place-items:center;color:#f5b83d;font:800 9px Space Grotesk;background:#162235}.brand b{display:block;font:700 12px Space Grotesk;letter-spacing:.02em}.brand small{display:block;color:#7f91a8;font-size:8px;margin-bottom:1px}.nav{display:flex;gap:24px}.nav a{color:#8596aa;font-size:10px;text-decoration:none}.nav a:hover{color:#dce9f7}.spacer{flex:1}.lang{height:29px;padding:0 9px;border:1px solid #2b3d53;background:#152235;color:#9db0c6;border-radius:6px;font-size:9px}.shell{min-height:calc(100vh - 58px);display:grid;place-items:center;padding:40px 20px}.auth{width:min(100%,360px);text-align:center}.auth h1{font:700 24px Space Grotesk;margin:0 0 8px}.auth>p{color:#899aaf;font-size:11px;line-height:1.55;margin:0 auto 24px;max-width:300px}.tabs{display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:4px;border:1px solid #263648;background:#0d141c;border-radius:9px;margin-bottom:14px}.tabs button{height:34px;border:0;border-radius:6px;background:transparent;color:#71849a;font-size:10px;font-weight:700;cursor:pointer}.tabs button.active{background:#1a2a3d;color:#e8f2ff;box-shadow:inset 0 0 0 1px #31557b}.field{display:grid;text-align:left;gap:6px;margin-bottom:10px}.field span{font-size:9px;color:#8999ac;font-weight:700}.field input{height:42px;border:1px solid #29394b;background:#121a23;border-radius:7px;padding:0 12px;color:#edf5ff;outline:0;font-size:11px}.field input:focus{border-color:#4e82ca;box-shadow:0 0 0 3px #5a8fe817}.submit{width:100%;height:42px;border:1px solid #659cf0;background:#5a8fe8;border-radius:7px;color:#07111f;font-size:10px;font-weight:800;cursor:pointer;margin-top:4px}.submit:hover{background:#6d9df0}.message{min-height:18px;margin-top:12px;font-size:9px;color:#8798ac;line-height:1.45}.message.error{color:#f08a91}.message.success{color:#65d99c}.terms{margin-top:14px!important;font-size:8px!important;color:#56677b!important}.back{display:inline-block;margin-top:22px;color:#6f8eb6;font-size:9px;text-decoration:none}.back:hover{color:#a9c8ef}.account-card{display:none;border:1px solid #26374a;background:#111923;border-radius:9px;padding:16px;text-align:left;margin-top:14px}.account-card.show{display:block}.account-card b{font-size:11px}.account-card span{display:block;margin-top:4px;color:#8495a8;font-size:9px}.account-actions{display:flex;gap:8px;margin-top:12px}.account-actions a,.account-actions button{flex:1;height:34px;border:1px solid #2e4662;background:#172539;border-radius:6px;color:#bcd0e7;font-size:9px;font-weight:700;display:grid;place-items:center;text-decoration:none;cursor:pointer}.account-actions button{background:#181d25;border-color:#3a343a;color:#d4b4b8}
+</style>
+</head>
+<body>
+<header class="top"><a class="brand" href="/"><span class="mark">SZ</span><span><small>STALZONE</small><b>Auction Tracker</b></span></a><nav class="nav"><a href="/">Home</a><a href="/build-calculator">Calculator</a></nav><div class="spacer"></div><button class="lang">EN</button></header>
+<main class="shell"><section class="auth">
+  <h1 id="title">Sign in</h1>
+  <p id="copy">Sign in to track auctions, save artifact watches, and get alerts when a listing reaches your target price.</p>
+  <div class="tabs" id="tabs"><button class="active" data-mode="login">Sign in</button><button data-mode="register">Register</button></div>
+  <form id="form">
+    <label class="field"><span>Email</span><input id="email" type="email" autocomplete="email" required placeholder="you@example.com"></label>
+    <label class="field"><span>Password</span><input id="password" type="password" autocomplete="current-password" minlength="6" required placeholder="At least 6 characters"></label>
+    <button class="submit" id="submit" type="submit">Sign in</button>
+    <div class="message" id="message"></div>
+  </form>
+  <div class="account-card" id="account-card"><b id="account-title">Signed in</b><span id="account-email"></span><div class="account-actions"><a href="/">Open tracker</a><button id="logout" type="button">Sign out</button></div></div>
+  <p class="terms">By continuing, you accept the site terms of use and privacy policy.</p>
+  <a class="back" href="/">← Back to Auction Tracker</a>
+</section></main>
+<script type="module">
+import {createClient} from 'https://esm.sh/@supabase/supabase-js@2';
+const supabase=createClient('https://ytnbyqrarwyuenicvtit.supabase.co','sb_publishable_4WadELHuM1lQcem38ZaA3w_x6CTzZMk');
+const $=id=>document.getElementById(id);let mode='login';
+function setMode(next){mode=next;document.querySelectorAll('[data-mode]').forEach(b=>b.classList.toggle('active',b.dataset.mode===mode));$('title').textContent=mode==='register'?'Create account':'Sign in';$('copy').textContent=mode==='register'?'Create an account to save artifact watches and keep your tracker settings across devices.':'Sign in to track auctions, save artifact watches, and get alerts when a listing reaches your target price.';$('submit').textContent=mode==='register'?'Create account':'Sign in';$('password').autocomplete=mode==='register'?'new-password':'current-password';$('message').textContent='';$('message').className='message'}
+function showSession(user){const on=!!user;$('form').style.display=on?'none':'';$('tabs').style.display=on?'none':'';$('account-card').classList.toggle('show',on);if(on){$('title').textContent='Welcome back';$('copy').textContent='Your saved watches and auction alerts are connected to this account.';$('account-email').textContent=user.email||'Signed in account'}}
+document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>setMode(b.dataset.mode));
+$('form').onsubmit=async e=>{e.preventDefault();const email=$('email').value.trim(),password=$('password').value,msg=$('message');msg.className='message';msg.textContent=mode==='register'?'Creating account…':'Signing in…';const result=mode==='register'?await supabase.auth.signUp({email,password}):await supabase.auth.signInWithPassword({email,password});if(result.error){msg.className='message error';msg.textContent=result.error.message;return}if(mode==='register'&&!result.data.session){msg.className='message success';msg.textContent='Account created. Check your email to confirm it, then return here to sign in.';return}msg.className='message success';msg.textContent='Signed in. Opening tracker…';setTimeout(()=>location.href=new URLSearchParams(location.search).get('next')||'/',450)};
+$('logout').onclick=async()=>{await supabase.auth.signOut();showSession(null);setMode('login')};
+const {data}=await supabase.auth.getSession();showSession(data.session?.user||null);supabase.auth.onAuthStateChange((_e,s)=>showSession(s?.user||null));
+</script>
+</body></html>
