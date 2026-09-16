@@ -93,11 +93,22 @@ def extract_quality(additional: dict | None) -> tuple[int | None, float | None]:
     return qlt, bonus
 
 
-def extract_market_variant(additional: dict | None) -> tuple[int | None, float, int]:
-    """Return (quality tier, raw bonus, exact +level). Unknown levels are -1."""
+def extract_pattern(additional: dict | None) -> int:
+    """Return EXBO artifact pattern (0..15), which maps inside the qlt quality bracket."""
+    if not isinstance(additional, dict):
+        return 0
+    try:
+        return max(0, min(15, int(additional.get("ptn", 0))))
+    except (TypeError, ValueError):
+        return 0
+
+
+def extract_market_variant(additional: dict | None) -> tuple[int | None, int, float, int]:
+    """Return (quality tier, pattern, raw bonus, exact +level). Unknown levels are -1."""
     qlt, bonus = extract_quality(additional)
+    ptn = extract_pattern(additional)
     level = extract_upgrade_level(additional)
-    return qlt, float(bonus or 0.0), -1 if level is None else int(level)
+    return qlt, ptn, float(bonus or 0.0), -1 if level is None else int(level)
 
 
 async def ingest_item_lots(api_client, db: MarketDB, item_id: str, item_name: str, region: str = None, limit: int = None) -> int:
@@ -113,7 +124,8 @@ async def ingest_item_lots(api_client, db: MarketDB, item_id: str, item_name: st
     recorded = 0
     lots = list(listing)
     for lot in lots:
-        qlt, bonus, level = extract_market_variant(getattr(lot, "additional", None))
+        additional = getattr(lot, "additional", None)
+        qlt, ptn, bonus, level = extract_market_variant(additional)
         if qlt is None:
             continue
         amount = getattr(lot, "amount", 1) or 1
@@ -124,7 +136,7 @@ async def ingest_item_lots(api_client, db: MarketDB, item_id: str, item_name: st
         start_time = getattr(lot, "start_time", None)
         lot_key = f"{item_id}_{start_time}_{buyout_price}_{amount}"
         db.record_snapshot(
-            item_id=item_id, item_name=item_name, region=region, qlt=qlt,
+            item_id=item_id, item_name=item_name, region=region, qlt=qlt, ptn=ptn,
             upgrade_level=level, bonus=bonus, bonus_bucket=bonus_bucket(bonus),
             amount=amount, buyout_price=buyout_price, unit_price=unit_price, lot_key=lot_key,
         )
@@ -145,7 +157,8 @@ async def ingest_item_history(api_client, db: MarketDB, item_id: str, item_name:
     recorded = 0
     history = list(listing)
     for price in history:
-        qlt, bonus, level = extract_market_variant(getattr(price, "additional", None))
+        additional = getattr(price, "additional", None)
+        qlt, ptn, bonus, level = extract_market_variant(additional)
         if qlt is None:
             continue
         amount = getattr(price, "amount", 1) or 1
@@ -155,7 +168,7 @@ async def ingest_item_history(api_client, db: MarketDB, item_id: str, item_name:
         sale_time = getattr(price, "time", None)
         observed_at = sale_time.timestamp() if hasattr(sale_time, "timestamp") else time.time()
         db.record_sale(
-            item_id=item_id, item_name=item_name, region=region, qlt=qlt,
+            item_id=item_id, item_name=item_name, region=region, qlt=qlt, ptn=ptn,
             upgrade_level=level, bonus_bucket=bonus_bucket(bonus),
             unit_price=sale_price / max(amount, 1), amount=amount,
             source="official_history", confidence=0.80, observed_at=observed_at,
