@@ -34,6 +34,7 @@ QUALITY_NAMES = {
     3: "Rare",
     4: "Exclusive",
     5: "Legendary",
+    6: "Unique",
 }
 
 _CLASS_LABELS = {
