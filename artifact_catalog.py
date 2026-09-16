@@ -20,6 +20,8 @@ _ICON_BASE = "https://raw.githubusercontent.com/EXBO-Studio/stalzone-database/ma
 _catalog_cache: dict[str, dict[str, Any]] = {}
 _catalog_loaded_at = 0.0
 _catalog_lock = asyncio.Lock()
+_variant_cache: dict[tuple[str, int], dict[str, Any]] = {}
+_variant_lock = asyncio.Lock()
 
 
 def _download_json(url: str) -> Any:
@@ -247,6 +249,56 @@ async def load_artifact_catalog(force: bool = False) -> dict[str, dict[str, Any]
         return _catalog_cache
 
 
-async def get_artifact_metadata(item_id: str) -> dict[str, Any] | None:
+def _variant_data_path(data_path: str, item_id: str, upgrade_level: int) -> str:
+    """Return the official EXBO path for one +level artifact variant."""
+    clean = str(data_path or "").strip("/")
+    parent = clean.rsplit("/", 1)[0]
+    return f"{parent}/_variants/{item_id}/{upgrade_level}.json"
+
+
+async def get_artifact_metadata(item_id: str, upgrade_level: int = 0) -> dict[str, Any] | None:
+    """Return official artifact metadata, using the exact EXBO +level variant when requested.
+
+    The base catalog stays cheap to warm. Exact +1..+15 JSON is fetched lazily and
+    cached per artifact/level so calculator/detail requests do not force ~1600 upstream
+    downloads during service startup.
+    """
     catalog = await load_artifact_catalog()
-    return catalog.get(item_id)
+    base = catalog.get(item_id)
+    if not base:
+        return None
+    try:
+        level = int(upgrade_level)
+    except (TypeError, ValueError):
+        level = 0
+    level = max(0, min(level, 15))
+    if level == 0:
+        return {**base, "upgrade_level": 0, "variant_exact": True, "stats_source": "official EXBO base (+0)"}
+
+    key = (item_id, level)
+    cached = _variant_cache.get(key)
+    if cached is not None:
+        return cached
+
+    async with _variant_lock:
+        cached = _variant_cache.get(key)
+        if cached is not None:
+            return cached
+        variant_path = _variant_data_path(str(base.get("data_path") or ""), item_id, level)
+        try:
+            raw = await asyncio.to_thread(_download_json, f"{_ICON_BASE}/{REALM}/{variant_path}")
+            stats = _extract_stats(raw)
+        except Exception:
+            raw = {}
+            stats = []
+        result = {
+            **base,
+            "stats": stats or list(base.get("stats") or []),
+            "stat_groups": sorted({s.get("group") for s in (stats or base.get("stats") or []) if s.get("group")}),
+            "upgrade_level": level,
+            "variant_exact": bool(stats),
+            "variant_data_path": variant_path,
+            "stats_source": "official EXBO enhancement variant" if stats else "base fallback (variant unavailable)",
+        }
+        _variant_cache[key] = result
+        return result
