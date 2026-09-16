@@ -131,13 +131,13 @@ def market(region: str = "na", live_minutes: int = 20, sale_days: int = 7):
 
     with db._conn() as conn:
         snapshots = conn.execute(
-            "SELECT id,item_id,item_name,qlt,upgrade_level,unit_price,lot_key,observed_at "
+            "SELECT id,item_id,item_name,qlt,ptn,upgrade_level,unit_price,lot_key,observed_at "
             "FROM auction_snapshot WHERE region=? AND observed_at>=? AND unit_price>0 "
             "AND upgrade_level BETWEEN 0 AND 15",
             (region, live_since),
         ).fetchall()
         sales = conn.execute(
-            "SELECT item_id,item_name,qlt,upgrade_level,unit_price,observed_at "
+            "SELECT item_id,item_name,qlt,ptn,upgrade_level,unit_price,observed_at "
             "FROM sale_observation WHERE region=? AND observed_at>=? AND unit_price>0 "
             "AND source='official_history' AND upgrade_level BETWEEN 0 AND 15",
             (region, sale_since),
@@ -166,14 +166,16 @@ def market(region: str = "na", live_minutes: int = 20, sale_days: int = 7):
 
     grouped = {}
 
-    def ensure(item_id, item_name, qlt, level):
-        key = (item_id, int(qlt), int(level))
+    def ensure(item_id, item_name, qlt, ptn, level):
+        key = (item_id, int(qlt), int(ptn), int(level))
         if key not in grouped:
             grouped[key] = {
                 "item_id": item_id,
                 "item_name": item_name or item_id,
                 "qlt": int(qlt),
                 "qlt_name": QUALITY_NAMES.get(int(qlt), f"Q{qlt}"),
+                "ptn": int(ptn),
+                "pattern_label": f"+{int(ptn)}",
                 "tier_color": QUALITY_COLORS.get(int(qlt), "#888"),
                 "upgrade_level": int(level),
                 "upgrade_label": f"+{int(level)}",
@@ -185,18 +187,24 @@ def market(region: str = "na", live_minutes: int = 20, sale_days: int = 7):
         return grouped[key]
 
     for r in snapshots:
-        g = ensure(r["item_id"], r["item_name"], r["qlt"], r["upgrade_level"])
+        g = ensure(r["item_id"], r["item_name"], r["qlt"], r["ptn"], r["upgrade_level"])
         g["_live"].append(r["unit_price"])
         g["latest_observation"] = max(g["latest_observation"], r["observed_at"] or 0)
 
     for r in sales:
-        g = ensure(r["item_id"], r["item_name"], r["qlt"], r["upgrade_level"])
+        g = ensure(r["item_id"], r["item_name"], r["qlt"], r["ptn"], r["upgrade_level"])
         g["_sales"].append(r["unit_price"])
         g["latest_sale"] = max(g["latest_sale"], r["observed_at"] or 0)
 
-    for v in valuations:
-        g = ensure(v["item_id"], v["item_name"], v["qlt"], v["upgrade_level"])
-        g["_valuation"] = v
+    valuation_map = {
+        (str(v["item_id"]), int(v["qlt"]), int(v["upgrade_level"])): v
+        for v in valuations
+    }
+    for key, g in grouped.items():
+        item_id, qlt, _ptn, level = key
+        v = valuation_map.get((str(item_id), int(qlt), int(level)))
+        if v is not None:
+            g["_valuation"] = v
 
     out = []
     for g in grouped.values():
@@ -226,7 +234,7 @@ def market(region: str = "na", live_minutes: int = 20, sale_days: int = 7):
             **targets,
         })
 
-    return sorted(out, key=lambda r: (r["item_name"].lower(), r["qlt"], r["upgrade_level"]))
+    return sorted(out, key=lambda r: (r["item_name"].lower(), r["qlt"], r["ptn"], r["upgrade_level"]))
 
 
 @app.get("/api/price-history")
