@@ -68,7 +68,7 @@ function buildControls(){
   $('reference-history').onclick=()=>{const selected=$('reference-artifact').value;let btn=selected?q(`[data-history="${CSS.escape(selected)}"]`):q('.artifact-card:not(.ref-hidden) [data-history]');if(btn){btn.click();return}if(selected){const art=refState.artifacts.find(a=>a.item_id===selected),search=$('search');if(search&&art){search.value=art.item_name;fire(search,'input');setTimeout(()=>q(`[data-history="${CSS.escape(selected)}"]`)?.click(),80)}}};
 }
 async function loadReferenceData(){try{const [arts,market,ops]=await Promise.all([get('/artifacts'),get('/market?region=na'),get('/opportunities?region=na&min_profit=0&min_roi=0&limit=500')]);refState.artifacts=arts||[];refState.market=market||[];refState.opportunities=ops||[];ensureUniqueFilter();populateArtifactSelect();applyReferenceFilters()}catch(e){console.warn('reference controls data load failed',e)}}
-function observeGrid(){const grid=$('artifact-grid');if(!grid)return;new MutationObserver(()=>queueMicrotask(applyReferenceFilters)).observe(grid,{childList:true,subtree:true})}
+function observeGrid(){const grid=$('artifact-grid');if(!grid)return;new MutationObserver(()=>queueMicrotask(applyReferenceFilters)).observe(grid,{childList:true})}
 function wireDedicatedAuth(){const auth=$('auth-button');if(!auth)return;auth.addEventListener('click',e=>{if(($('auth-button-label')?.textContent||'').trim().toLowerCase()==='login'){e.preventDefault();e.stopImmediatePropagation();location.href='/login'}},true)}
 function init(){style();buildControls();observeGrid();wireDedicatedAuth();ensureUniqueFilter();loadReferenceData();setInterval(()=>loadReferenceData(),60000)}
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
