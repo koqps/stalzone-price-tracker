@@ -45,3 +45,26 @@
 @media(max-width:1100px){.sidebar{padding:0 14px}.page-content{padding-left:14px;padding-right:14px}.topbar{padding-left:14px;padding-right:14px}.artifact-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:820px){.sidebar .nav-section:first-of-type .side-link:nth-child(n+4){display:none}.feed-card{display:none}.artifact-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.filter-bar{overflow-x:auto;align-items:end}.filter-spacer{min-width:20px}.global-search{max-width:none;flex:1}.desktop-label{display:none}}
 @media(max-width:560px){.brand span:last-child{display:none}.sidebar{gap:4px}.side-link{padding:0 8px;font-size:10px}.page-content{padding-top:12px}.artifact-grid{grid-template-columns:1fr}.page-heading p{display:none}.filter-bar{top:110px}.topbar{gap:6px}.top-button{padding:0 8px}}
+
+
+/* Reference-inspired usability pass */
+.sidebar{height:56px;padding-left:max(18px,calc((100vw - 1180px)/2));padding-right:max(18px,calc((100vw - 1180px)/2));gap:12px;background:#141c25}
+.brand-row{margin-right:8px}.brand-mark{width:25px;height:25px;border-radius:6px}.brand b{font-size:12px;letter-spacing:.02em}
+.sidebar .nav-section:first-of-type{display:flex}.sidebar .nav-section:first-of-type .side-link{height:56px;min-height:56px;padding:0 10px;font-size:10px}.sidebar .nav-section:first-of-type .side-link:nth-of-type(2),.sidebar .nav-section:first-of-type .side-link:nth-of-type(3){display:none}
+.sidebar .nav-section:nth-of-type(3){display:flex}.sidebar .nav-section:nth-of-type(3) .side-link{height:56px;min-height:56px;padding:0 10px;font-size:10px}.sidebar .nav-section:nth-of-type(3) .side-link:first-of-type span:last-child{font-size:0}.sidebar .nav-section:nth-of-type(3) .side-link:first-of-type span:last-child:after{content:'Calculator';font-size:10px}
+.sidebar-spacer{flex:1}.header-actions{display:flex;align-items:center;gap:6px;order:7}.header-actions .top-button{height:30px;border-radius:5px;padding:0 10px;font-size:9px}.header-actions .top-button.primary{margin-left:0}.feed-card{display:none}.account-card{display:none!important}
+.market-app{padding-top:56px}.topbar{position:relative;top:auto;height:46px;padding:7px max(18px,calc((100vw - 1180px)/2));border-bottom:0;background:#0b1015}.topbar .mobile-only,.top-title{display:none}.global-search{max-width:330px;height:31px;margin:0;border-radius:5px}
+.page-content{max-width:1180px;padding-top:6px}.page-heading{margin:0 0 9px;min-height:26px}.page-heading>div:first-child{gap:8px}.page-heading p{color:#77889a}.eyebrow{font-weight:700}
+.filter-bar{top:56px;padding:8px 0 10px;gap:8px;margin-bottom:10px}.reference-control label,.filter-label{font-size:8px}.reference-control select,.reference-control input,.filter-group select{height:31px;border-radius:5px}.reference-actions button{height:31px;border-radius:5px}.layout-toggle,.refresh-button{height:31px}
+.watch-hit-banner{margin:6px 0 10px;padding:8px 10px;border-radius:7px}.watch-hit-icon{width:29px;height:29px;border-radius:6px}.watch-hit-banner b{font-size:10px}
+.content-state{min-height:110px;border-radius:7px;margin-bottom:10px}.content-state .spinner{width:20px;height:20px}.content-state b{font-size:10px}.content-state span{font-size:8px}
+.artifact-grid{gap:8px}.artifact-card{border-radius:6px}.card-head{padding-top:10px}.card-footer{min-height:38px}.modal-panel{box-shadow:0 18px 65px #0009}.history-panel{max-width:900px!important}
+@media(max-width:820px){.sidebar .nav-section:nth-of-type(3){display:none}.header-actions .desktop-label{display:none}.topbar{padding:7px 12px}.global-search{max-width:none;width:100%}}
+
+/* Final desktop header cleanup */
+@media(min-width:821px){.topbar{display:none}.page-content{padding-top:12px}}
+
+/* Use the real account card in the header */
+.header-actions #auth-button{display:none}
+.account-card{display:flex!important;order:9;width:auto;height:32px;padding:0 9px;border:1px solid #2b3a4a;border-radius:5px;background:#182432!important;gap:7px}
+.account-card:hover{background:#1d2c3c!important;border-color:#45627f}.account-card .avatar{display:grid;width:21px;height:21px;border-radius:4px;font-size:9px}.account-card b{font-size:9px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.account-card small,.account-chevron{display:none}
