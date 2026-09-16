@@ -34,9 +34,6 @@ CREATE TABLE IF NOT EXISTS sale_observation (
  qlt INTEGER NOT NULL,ptn INTEGER NOT NULL DEFAULT 0,upgrade_level INTEGER NOT NULL DEFAULT -1,bonus_bucket INTEGER NOT NULL DEFAULT 0,
  unit_price REAL NOT NULL,amount INTEGER NOT NULL DEFAULT 1,source TEXT NOT NULL,confidence REAL NOT NULL,
  observed_at REAL NOT NULL);
-DROP INDEX IF EXISTS idx_sale_dedupe;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_sale_dedupe ON sale_observation(item_id,region,qlt,ptn,upgrade_level,unit_price,amount,source,observed_at);
-
 CREATE TABLE IF NOT EXISTS community_signal (
  id INTEGER PRIMARY KEY AUTOINCREMENT,item_id TEXT,item_name TEXT NOT NULL,region TEXT NOT NULL DEFAULT 'na',
  qlt INTEGER,upgrade_level INTEGER NOT NULL DEFAULT -1,bonus_bucket INTEGER,claimed_price REAL,
