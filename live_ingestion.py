@@ -29,7 +29,7 @@ REALM = os.getenv("REALM", "global").lower()
 _api_client = None
 _db_lookup = None
 
-QUALITY_NAMES = {0:"Common",1:"Uncommon",2:"Special",3:"Rare",4:"Exclusive",5:"Legendary"}
+QUALITY_NAMES = {0:"Common",1:"Uncommon",2:"Special",3:"Rare",4:"Exclusive",5:"Legendary",6:"Unique"}
 
 
 def get_api_client():
@@ -74,13 +74,13 @@ async def load_tradeable_artifacts() -> dict[str, str]:
 
 
 def extract_quality(additional: dict | None) -> tuple[int | None, float | None]:
-    """Backward-compatible (quality, bonus) extraction."""
+    """Backward-compatible (quality tier, upgrade bonus) extraction."""
     if not additional or not isinstance(additional, dict):
         return None, None
     raw = additional.get("qlt", additional.get("quality"))
     try:
         qlt = int(raw)
-        qlt = max(0, min(5, qlt))
+        qlt = max(0, min(6, qlt))
     except (TypeError, ValueError):
         qlt = None
     bonus = additional.get("upgrade_bonus")
@@ -94,7 +94,7 @@ def extract_quality(additional: dict | None) -> tuple[int | None, float | None]:
 
 
 def extract_market_variant(additional: dict | None) -> tuple[int | None, float, int]:
-    """Return (quality, raw bonus, exact +level). Unknown levels are -1."""
+    """Return (quality tier, raw bonus, exact +level). Unknown levels are -1."""
     qlt, bonus = extract_quality(additional)
     level = extract_upgrade_level(additional)
     return qlt, float(bonus or 0.0), -1 if level is None else int(level)
