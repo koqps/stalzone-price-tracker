@@ -56,6 +56,9 @@ def _line(value: Any, language: str = "en") -> str:
     lines = value.get("lines")
     if isinstance(lines, dict):
         return str(lines.get(language) or lines.get("en") or lines.get("ru") or "")
+    # Formatted tooltip values are plain language maps rather than translation objects.
+    if any(k in value for k in (language, "en", "ru")):
+        return str(value.get(language) or value.get("en") or value.get("ru") or "")
     if value.get("type") == "text":
         return str(value.get("text") or "")
     return ""
