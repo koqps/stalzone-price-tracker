@@ -70,5 +70,27 @@ function loadNamed(){try{const b=JSON.parse(localStorage.getItem('stalzoneBuildS
 function shareBuild(){const raw=JSON.stringify(serialize()),encoded=btoa(unescape(encodeURIComponent(raw)));const u=new URL(location.href);u.searchParams.set('build',encoded);navigator.clipboard?.writeText(u.toString()).then(()=>toast('Share link copied')).catch(()=>{prompt('Copy this build link',u.toString())})}
 function loadShared(){const enc=new URLSearchParams(location.search).get('build');if(!enc)return false;try{return applyBuild(JSON.parse(decodeURIComponent(escape(atob(enc)))))}catch{return false}}
 function loadRequestedArtifact(){const id=new URLSearchParams(location.search).get('artifact');if(!id||!state.artifacts.some(a=>a.id===id))return false;const i=Math.max(0,state.slots.findIndex(s=>!s.itemId));state.slots[i]={...emptySlot(),itemId:id};state.selected=i;return true}
-async function init(){try{const [data,market]=await Promise.all([get('/build-calculator-data'),get('/market?region=na&live_minutes=20&sale_days=7')]);state.artifacts=data.artifacts||[];state.containers=data.containers||[];state.market=market||[];state.containerId=state.containers[0]?.id||'';syncCapacity();if(!loadShared())loadDraft();syncCapacity();loadRequestedArtifact();await Promise.all([...new Map(state.slots.filter(s=>s.itemId).map(s=>[variantKey(s.itemId,s.level),s])).values()].map(s=>ensureExactStats(s.itemId,s.level)));renderAll()}catch(e){console.error(e);$('artifact-editor').innerHTML=`<div class="editor-empty"><div><strong>Calculator failed to load</strong><p>${esc(e.message)}</p></div></div>`}}
+async function init(){
+  try{
+    const data=await get('/build-calculator-data');
+    state.artifacts=data.artifacts||[];
+    state.containers=data.containers||[];
+    state.containerId=state.containers[0]?.id||'';
+    syncCapacity();
+    if(!loadShared())loadDraft();
+    syncCapacity();
+    loadRequestedArtifact();
+    renderAll();
+    get('/market?region=na&live_minutes=20&sale_days=7').then(market=>{
+      state.market=market||[];
+      renderAll();
+    }).catch(e=>console.warn('Live market pricing unavailable; calculator remains usable',e));
+    await Promise.all([...new Map(state.slots.filter(s=>s.itemId).map(s=>[variantKey(s.itemId,s.level),s])).values()].map(s=>ensureExactStats(s.itemId,s.level)));
+    renderAll();
+  }catch(e){
+    console.error(e);
+    $('container').innerHTML='<option>Calculator data unavailable</option>';
+    $('artifact-editor').innerHTML=`<div class="editor-empty"><div><strong>Calculator failed to load</strong><p>${esc(e.message)}</p></div></div>`;
+  }
+}
 $('container').onchange=e=>{state.containerId=e.target.value;syncCapacity();commit()};$('clear-slots').onclick=()=>{state.slots=state.slots.map(()=>emptySlot());state.selected=0;commit();toast('Artifacts cleared')};$('duplicate-selected').onclick=()=>{const s=state.slots[state.selected];if(!s?.itemId)return toast('Select an artifact first');const target=state.slots.findIndex((x,i)=>i!==state.selected&&!x.itemId);if(target<0)return toast('No empty slot to duplicate into');state.slots[target]=JSON.parse(JSON.stringify(s));state.selected=target;commit();toast('Artifact duplicated')};$('add-first').onclick=()=>{let i=state.slots.findIndex(s=>!s.itemId);if(i<0)i=state.selected;openPicker(i)};$('change-artifact').onclick=()=>openPicker(state.selected);$('close-picker').onclick=closePicker;$('picker-backdrop').onclick=e=>{if(e.target===$('picker-backdrop'))closePicker()};$('artifact-search').oninput=renderPickerList;$('positive-filter').onchange=renderPickerList;$('negative-filter').onchange=renderPickerList;document.addEventListener('keydown',e=>{if(e.key==='Escape')closePicker()});document.querySelectorAll('.result-tab').forEach(b=>b.onclick=()=>{state.resultTab=b.dataset.resultTab;renderResult()});$('save').onclick=saveNamed;$('load-saved').onclick=loadNamed;$('share').onclick=shareBuild;$('reset').onclick=()=>{state.containerId=state.containers[0]?.id||'';state.slots=[];syncCapacity();state.selected=0;state.baseHealth=100;persist();renderAll();toast('New build ready')};$('theme').onchange=e=>{document.documentElement.dataset.theme=e.target.value;localStorage.setItem('stalzoneTheme',e.target.value)};document.documentElement.dataset.theme=localStorage.getItem('stalzoneTheme')||'violet';$('theme').value=document.documentElement.dataset.theme;init();
