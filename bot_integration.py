@@ -1,9 +1,9 @@
 """Bridge between the Discord bot and exact-level market intelligence.
 
 The public bot.py API is kept stable, but the second value returned by
-``get_lot_quality`` is an exact enhancement key (+N -> N/100). Internally every
-comparison is made with the explicit integer upgrade level, so +0..+15 never
-share evidence.
+``get_lot_quality`` is an exact ptn/+level compatibility key (+N -> N/100).
+Internally every comparison is made with the explicit integer ptn/+level, so
++0..+15 never share evidence.
 """
 from __future__ import annotations
 
@@ -125,6 +125,7 @@ async def record_observations(db: MarketDB, item_id: str, item_name: str, lots: 
             item_name=item_name,
             region=region,
             qlt=qlt,
+            ptn=level,
             upgrade_level=level,
             bonus=_raw_bonus(additional),
             bonus_bucket=_level_bucket(level),
@@ -147,6 +148,7 @@ async def record_sale(db: MarketDB, item_id: str, item_name: str, qlt: int, upgr
         item_name=item_name,
         region=region,
         qlt=qlt,
+        ptn=level,
         upgrade_level=level,
         bonus_bucket=_level_bucket(level),
         unit_price=unit_price,
