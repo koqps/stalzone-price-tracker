@@ -10,7 +10,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/market-v2.css?v=1">
-<link rel="stylesheet" href="/static/market-reference.css?v=1">
+<link rel="stylesheet" href="/static/market-reference.css?v=4">
 </head>
 <body>
 <div class="market-app">
@@ -38,6 +38,10 @@
     <button class="side-link" data-view="patches"><span class="ui-icon">▤</span><span>Patch Watch</span></button>
   </div>
   <div class="sidebar-spacer"></div>
+  <div class="header-actions">
+    <button class="top-button" id="sound-button" title="Enable watch alert sound"><span>♪</span><span class="desktop-label">Sound</span></button>
+    <button class="top-button primary" id="auth-button"><span>♙</span><span id="auth-button-label">Login</span></button>
+  </div>
   <div class="feed-card"><span class="live-dot"></span><div><b>Official NA feed</b><small id="feed-status">Connecting…</small></div></div>
   <button class="account-card" id="account-card"><span class="avatar" id="account-avatar">?</span><span><b id="account-name">Sign in</b><small id="account-sub">Save price watches</small></span><span class="account-chevron">›</span></button>
 </aside>
@@ -46,8 +50,7 @@
   <button class="icon-button mobile-only" id="open-sidebar" aria-label="Open menu">☰</button>
   <div class="top-title"><small>Marketplace</small><b id="top-title">Artifacts</b></div>
   <label class="global-search"><span>⌕</span><input id="search" placeholder="Search artifact, class, or stat…" autocomplete="off"></label>
-  <button class="top-button" id="sound-button" title="Enable watch alert sound"><span>♪</span><span class="desktop-label">Sound</span></button>
-  <button class="top-button primary" id="auth-button"><span>♙</span><span id="auth-button-label">Login</span></button>
+
 </header>
 <section class="page-content">
   <section class="page-heading">
