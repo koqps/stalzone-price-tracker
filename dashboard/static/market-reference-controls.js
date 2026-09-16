@@ -79,5 +79,6 @@ async function loadReferenceData(){
   }catch(e){console.warn('reference controls data load failed',e)}
 }
 function observeGrid(){const grid=$('artifact-grid');if(!grid)return;new MutationObserver(()=>queueMicrotask(applyReferenceFilters)).observe(grid,{childList:true,subtree:true})}
-function init(){style();buildControls();observeGrid();loadReferenceData();setInterval(()=>loadReferenceData(),60000)}
+function wireDedicatedAuth(){const auth=$('auth-button');if(!auth)return;auth.addEventListener('click',e=>{if(($('auth-button-label')?.textContent||'').trim().toLowerCase()==='login'){e.preventDefault();e.stopImmediatePropagation();location.href='/static/login.html'}},true)}
+function init(){style();buildControls();observeGrid();wireDedicatedAuth();loadReferenceData();setInterval(()=>loadReferenceData(),60000)}
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
