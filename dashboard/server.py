@@ -25,6 +25,7 @@ QUALITY_COLORS = {
     3: "#9a63d8",
     4: "#e05252",
     5: "#e6a33c",
+    6: "#ef78c8",
 }
 
 
@@ -126,10 +127,6 @@ def market(region: str = "na", live_minutes: int = 20, sale_days: int = 7):
     now = time.time()
     live_since = now - max(5, live_minutes) * 60
     sale_since = now - max(1, sale_days) * 86400
-    # Valuations are continuously recomputed by the collector. Looking through
-    # the entire lifetime table for MAX(computed_at) was the main production
-    # bottleneck. Six hours easily covers a complete collector cycle while
-    # keeping the query bounded even after months of operation.
     valuation_since = now - 6 * 3600
 
     with db._conn() as conn:
@@ -290,8 +287,6 @@ def summary(region: str = "na"):
                 "SELECT name,seq FROM sqlite_sequence WHERE name IN ('auction_snapshot','sale_observation')"
             ).fetchall()
         }
-        # Active tracked item count only needs a recent window and remains exact
-        # for the dashboard's purpose while avoiding a lifetime DISTINCT scan.
         items = conn.execute(
             "SELECT COUNT(DISTINCT item_id) FROM auction_snapshot WHERE region=? AND observed_at>=?",
             (region, now - 24 * 3600),
@@ -334,6 +329,11 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 @app.get("/")
 def index():
     return FileResponse(str(STATIC_DIR / "index.html"))
+
+
+@app.get("/login")
+def login_page():
+    return FileResponse(str(STATIC_DIR / "login.html"))
 
 
 @app.get("/app.js")
