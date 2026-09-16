@@ -22,21 +22,20 @@ from supabase_sync import hydrate_sqlite, mirror, enabled as supabase_enabled
 log = logging.getLogger("market_db")
 DB_PATH = Path(__file__).parent / "cache" / "market.db"
 
-# Only tables plus correctness-critical unique indexes live on the synchronous
-# startup path. The larger read-optimization indexes are built in background.
 CORE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS auction_snapshot (
  id INTEGER PRIMARY KEY AUTOINCREMENT,item_id TEXT NOT NULL,item_name TEXT,region TEXT NOT NULL,
- qlt INTEGER NOT NULL,upgrade_level INTEGER NOT NULL DEFAULT -1,bonus REAL NOT NULL DEFAULT 0,
+ qlt INTEGER NOT NULL,ptn INTEGER NOT NULL DEFAULT 0,upgrade_level INTEGER NOT NULL DEFAULT -1,bonus REAL NOT NULL DEFAULT 0,
  bonus_bucket INTEGER NOT NULL DEFAULT 0,amount INTEGER NOT NULL DEFAULT 1,buyout_price REAL,
  unit_price REAL,lot_key TEXT,observed_at REAL NOT NULL);
 
 CREATE TABLE IF NOT EXISTS sale_observation (
  id INTEGER PRIMARY KEY AUTOINCREMENT,item_id TEXT NOT NULL,item_name TEXT,region TEXT NOT NULL,
- qlt INTEGER NOT NULL,upgrade_level INTEGER NOT NULL DEFAULT -1,bonus_bucket INTEGER NOT NULL DEFAULT 0,
+ qlt INTEGER NOT NULL,ptn INTEGER NOT NULL DEFAULT 0,upgrade_level INTEGER NOT NULL DEFAULT -1,bonus_bucket INTEGER NOT NULL DEFAULT 0,
  unit_price REAL NOT NULL,amount INTEGER NOT NULL DEFAULT 1,source TEXT NOT NULL,confidence REAL NOT NULL,
  observed_at REAL NOT NULL);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_sale_dedupe ON sale_observation(item_id,region,qlt,upgrade_level,unit_price,amount,source,observed_at);
+DROP INDEX IF EXISTS idx_sale_dedupe;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sale_dedupe ON sale_observation(item_id,region,qlt,ptn,upgrade_level,unit_price,amount,source,observed_at);
 
 CREATE TABLE IF NOT EXISTS community_signal (
  id INTEGER PRIMARY KEY AUTOINCREMENT,item_id TEXT,item_name TEXT NOT NULL,region TEXT NOT NULL DEFAULT 'na',
@@ -76,9 +75,9 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT,updated_at REAL
 """
 
 OPTIMIZATION_INDEXES = """
-CREATE INDEX IF NOT EXISTS idx_snapshot_lookup ON auction_snapshot(item_id,region,qlt,upgrade_level,observed_at);
+CREATE INDEX IF NOT EXISTS idx_snapshot_lookup ON auction_snapshot(item_id,region,qlt,ptn,upgrade_level,observed_at);
 CREATE INDEX IF NOT EXISTS idx_snapshot_region_time ON auction_snapshot(region,observed_at);
-CREATE INDEX IF NOT EXISTS idx_sale_lookup ON sale_observation(item_id,region,qlt,upgrade_level,observed_at);
+CREATE INDEX IF NOT EXISTS idx_sale_lookup ON sale_observation(item_id,region,qlt,ptn,upgrade_level,observed_at);
 CREATE INDEX IF NOT EXISTS idx_sale_region_source_time ON sale_observation(region,source,observed_at);
 CREATE INDEX IF NOT EXISTS idx_community_lookup ON community_signal(item_name,region,collected_at);
 CREATE INDEX IF NOT EXISTS idx_valuation_lookup ON valuation_report(item_id,region,qlt,upgrade_level,computed_at);
@@ -102,8 +101,6 @@ class MarketDB:
     def __init__(self, path: Path = DB_PATH) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        # Keep this path short. combined.py imports multiple MarketDB users
-        # before uvicorn.run(), so any expensive work here creates a full-site 502.
         with self._conn() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
@@ -113,11 +110,6 @@ class MarketDB:
         self._schedule_background_maintenance()
 
     def _schedule_background_maintenance(self) -> None:
-        # The Google production VM is the live collector and has a persistent
-        # SQLite cache. Running hydration/index rebuilds inside that same
-        # process competes with collector writes and can lock every dashboard
-        # endpoint. Render explicitly sets COLLECTOR_ENABLED=false, so it can
-        # still hydrate its ephemeral cache in the background.
         collector_enabled = os.getenv("COLLECTOR_ENABLED", "true").strip().lower() in {
             "1", "true", "yes", "on"
         }
@@ -136,9 +128,7 @@ class MarketDB:
         ).start()
 
     def _background_maintenance(self) -> None:
-        """Hydrate/optimize after HTTP startup instead of blocking uvicorn bind."""
         key = str(self.path.resolve())
-        # Give combined.main() time to reach uvicorn.run() first.
         time.sleep(12)
         try:
             if supabase_enabled() and key not in self._hydrated_paths:
@@ -154,7 +144,6 @@ class MarketDB:
                 conn.execute("PRAGMA optimize")
             log.info("Background SQLite maintenance complete")
         except Exception:
-            # Maintenance is best-effort. Never kill HTTP availability.
             log.exception("Background database maintenance failed")
 
     def _upgrade_legacy_schema(self, conn: sqlite3.Connection) -> None:
@@ -162,9 +151,15 @@ class MarketDB:
             cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
             if "upgrade_level" not in cols:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN upgrade_level INTEGER NOT NULL DEFAULT -1")
+        for table in ("auction_snapshot", "sale_observation"):
+            cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            if "ptn" not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN ptn INTEGER NOT NULL DEFAULT 0")
         cols = {r[1] for r in conn.execute("PRAGMA table_info(valuation_report)").fetchall()}
         if "patch_risk" not in cols:
             conn.execute("ALTER TABLE valuation_report ADD COLUMN patch_risk REAL NOT NULL DEFAULT 0")
+        conn.execute("DROP INDEX IF EXISTS idx_sale_dedupe")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sale_dedupe ON sale_observation(item_id,region,qlt,ptn,upgrade_level,unit_price,amount,source,observed_at)")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -192,11 +187,11 @@ class MarketDB:
         mirror.enqueue(table, fields)
 
     def record_snapshot(self, **fields: Any) -> None:
-        fields.setdefault("upgrade_level", -1); fields.setdefault("observed_at", time.time())
+        fields.setdefault("ptn", 0); fields.setdefault("upgrade_level", -1); fields.setdefault("observed_at", time.time())
         self._insert("auction_snapshot", fields)
 
     def record_sale(self, **fields: Any) -> None:
-        fields.setdefault("upgrade_level", -1); fields.setdefault("observed_at", time.time())
+        fields.setdefault("ptn", 0); fields.setdefault("upgrade_level", -1); fields.setdefault("observed_at", time.time())
         self._insert("sale_observation", fields, ignore=True)
 
     def record_community_signal(self, **fields: Any) -> None:
@@ -205,8 +200,6 @@ class MarketDB:
 
     def record_valuation(self, **fields: Any) -> None:
         fields.setdefault("upgrade_level", -1); fields.setdefault("patch_risk", 0.0); fields.setdefault("computed_at", time.time())
-        # A scan evaluates many lots from the same exact variant. Persist at most
-        # one valuation per variant every two minutes instead of one per lot.
         with self._conn() as conn:
             recent = conn.execute(
                 "SELECT computed_at FROM valuation_report WHERE item_id=? AND region=? AND qlt=? "
