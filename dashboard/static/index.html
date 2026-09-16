@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#0b0f14">
-<title>StalZone Market</title>
+<title>Stalzone Market</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -16,7 +16,7 @@
 <div class="market-app">
 <aside class="sidebar" id="sidebar">
   <div class="brand-row">
-    <a class="brand" href="/" aria-label="StalZone home"><span class="brand-mark">SZ</span><span><b>STALZONE</b><small>NA Market</small></span></a>
+    <a class="brand" href="/" aria-label="Stalzone Market home"><span class="brand-mark">SZ</span><span><b>Stalzone Market</b><small>NA Market</small></span></a>
     <button class="icon-button mobile-only" id="close-sidebar" aria-label="Close menu">×</button>
   </div>
   <div class="nav-section"><span class="nav-label">Market</span>
@@ -71,11 +71,11 @@
 </div>
 <div class="modal-backdrop" id="detail-modal" aria-hidden="true"><section class="modal-panel detail-panel"><button class="modal-close" data-close="detail-modal">×</button><div id="detail-content"></div></section></div>
 <div class="modal-backdrop" id="history-modal" aria-hidden="true"><section class="modal-panel history-panel"><button class="modal-close" data-close="history-modal">×</button><div class="modal-kicker">Official completed sales</div><div class="history-head"><div><h2 id="history-title">Price history</h2><p class="modal-copy" id="history-copy"></p></div><select id="history-variant"></select></div><div class="history-range"><button class="active" data-hours="24">24h</button><button data-hours="72">3d</button><button data-hours="168">7d</button><button data-hours="720">30d</button><button data-hours="2160">90d</button></div><div class="history-summary"><small>Average price</small><b id="history-average">—</b><span id="history-change"></span></div><div class="chart-wrap"><canvas id="history-chart" width="900" height="330"></canvas></div><div class="history-sales" id="history-sales"></div></section></div>
-<div class="modal-backdrop" id="auth-modal" aria-hidden="true"><section class="modal-panel auth-panel"><button class="modal-close" data-close="auth-modal">×</button><div class="modal-kicker">StalZone account</div><h2 id="auth-title">Welcome back</h2><p class="modal-copy" id="auth-copy">Sign in to save artifact watches and get price alerts while the market is open.</p><div class="auth-tabs"><button class="active" data-auth-mode="login">Login</button><button data-auth-mode="register">Register</button></div><form id="auth-form"><label>Email<input id="auth-email" type="email" autocomplete="email" required placeholder="you@example.com"></label><label>Password<input id="auth-password" type="password" autocomplete="current-password" required minlength="6" placeholder="At least 6 characters"></label><button class="modal-primary" id="auth-submit" type="submit">Login</button><div class="form-message" id="auth-message"></div></form></section></div>
+<div class="modal-backdrop" id="auth-modal" aria-hidden="true"><section class="modal-panel auth-panel"><button class="modal-close" data-close="auth-modal">×</button><div class="modal-kicker">Stalzone Market account</div><h2 id="auth-title">Welcome back</h2><p class="modal-copy" id="auth-copy">Sign in to save artifact watches and get price alerts while the market is open.</p><div class="auth-tabs"><button class="active" data-auth-mode="login">Login</button><button data-auth-mode="register">Register</button></div><form id="auth-form"><label>Email<input id="auth-email" type="email" autocomplete="email" required placeholder="you@example.com"></label><label>Password<input id="auth-password" type="password" autocomplete="current-password" required minlength="6" placeholder="At least 6 characters"></label><button class="modal-primary" id="auth-submit" type="submit">Login</button><div class="form-message" id="auth-message"></div></form></section></div>
 <div class="modal-backdrop" id="watch-modal" aria-hidden="true"><section class="modal-panel watch-panel"><button class="modal-close" data-close="watch-modal">×</button><div class="modal-kicker">Price watch</div><div class="watch-artifact" id="watch-artifact"></div><form id="watch-form"><label>Variant<select id="watch-variant"></select></label><label>Alert me at or below<input id="watch-price" type="number" min="1" step="1000" required placeholder="Price in ₽"></label><label class="check-row"><input id="watch-sound" type="checkbox" checked><span><b>Audible ping</b><small>Play a sound when a matching live floor reaches your price.</small></span></label><button class="modal-primary" type="submit">Save watch</button><div class="form-message" id="watch-message"></div></form></section></div>
 <div class="modal-backdrop" id="account-modal" aria-hidden="true"><section class="modal-panel auth-panel"><button class="modal-close" data-close="account-modal">×</button><div class="modal-kicker">Account</div><h2 id="account-modal-title">Your account</h2><p class="modal-copy" id="account-modal-copy"></p><button class="modal-primary danger-outline" id="logout-button">Sign out</button></section></div>
 <div class="toast" id="toast"></div>
-<script type="module" src="/static/market-v2.js?v=2"></script>
-<script type="module" src="/static/market-reference-controls.js?v=3"></script>
+<script type="module" src="/static/market-v2.js?v=4"></script>
+<script type="module" src="/static/market-reference-controls.js?v=4"></script>
 </body>
 </html>
