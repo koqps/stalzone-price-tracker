@@ -30,7 +30,7 @@ function marketRows(itemId){return refState.market.filter(r=>r.item_id===itemId)
 function selectedMarketRow(itemId){
   let rows=marketRows(itemId);const rf=$('rarity-filter')?.value??'',lf=$('level-filter')?.value??'';
   if(rf!=='')rows=rows.filter(r=>Number(r.qlt)===Number(rf));
-  if(lf!=='')rows=rows.filter(r=>Number(r.upgrade_level)===Number(lf));
+  if(lf!=='')rows=rows.filter(r=>Number(r.ptn)===Number(lf));
   return rows.sort((a,b)=>Number(a.live_floor??Infinity)-Number(b.live_floor??Infinity)||Number(b.sale_count||0)-Number(a.sale_count||0))[0]||null;
 }
 function opportunityMetrics(row){
@@ -39,7 +39,7 @@ function opportunityMetrics(row){
   if(!(buy>0&&target>0))return{profit:Number(row.estimated_profit||0),roi:Number(row.roi_pct||0),buy,target:Number(row.resale_target||0)};
   const profit=target*(1-tax)-buy;return{buy,target,profit,roi:buy?profit/buy*100:0};
 }
-function bestOpportunity(itemId){const rows=refState.opportunities.filter(r=>r.item_id===itemId).map(row=>({row,metrics:opportunityMetrics(row)})).filter(x=>x.metrics);rows.sort((a,b)=>b.metrics.profit-a.metrics.profit||b.metrics.roi-a.metrics.roi);return rows[0]||null}
+function bestOpportunity(itemId){const shown=selectedMarketRow(itemId);if(!shown)return null;const rows=refState.opportunities.filter(r=>r.item_id===itemId&&Number(r.qlt)===Number(shown.qlt)&&Number(r.ptn)===Number(shown.ptn)&&Number(r.upgrade_level)===Number(shown.upgrade_level)).map(row=>({row,metrics:opportunityMetrics(row)})).filter(x=>x.metrics);rows.sort((a,b)=>b.metrics.profit-a.metrics.profit||b.metrics.roi-a.metrics.roi);return rows[0]||null}
 function passesReferenceFilters(itemId){const rows=marketRows(itemId),best=bestOpportunity(itemId);if(refState.stateMode==='live'&&!rows.some(r=>Number(r.live_listings||0)>0||Number(r.live_floor||0)>0))return false;if(refState.stateMode==='sales'&&!rows.some(r=>Number(r.sale_count||0)>0))return false;if(refState.minProfit>0&&(!best||best.metrics.profit<refState.minProfit))return false;if(refState.minRoi>0&&(!best||best.metrics.roi<refState.minRoi))return false;return true}
 function addProfitStrip(card,itemId){card.querySelector('.reference-profit-strip')?.remove();const best=bestOpportunity(itemId);if(!best||best.metrics.profit<=0)return;const strip=document.createElement('div');strip.className='reference-profit-strip';strip.innerHTML=`<div class="cost"><small>Cost</small><b>${money(best.metrics.buy)}</b></div><div class="target"><small>Target price</small><b>${money(best.metrics.target)}</b></div><div class="profit"><small>Profit</small><b>+${money(best.metrics.profit)} (${Math.round(best.metrics.roi)}%)</b></div>`;const footer=card.querySelector('.card-footer');card.insertBefore(strip,footer||null)}
 function fullQualityEndpoint(stat){const a=Number(stat.min||0),b=Number(stat.max||0);return Math.abs(a)>=Math.abs(b)?a:b}
