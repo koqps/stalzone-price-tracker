@@ -70,17 +70,39 @@ async def load_catalog():
     raw = await lookup.get_all(realm=REALM)
     result = {}
     for item_id, item in raw.items():
-        if not isinstance(item, dict): continue
-        cats = " ".join(str(item.get(k) or "") for k in ("category","sub_category","subcategory","path", "type")).lower()
-        if "artifact" not in cats and "artefact" not in cats and "/items/artefact/" not in str(item_id).lower():
+        if not isinstance(item, dict):
             continue
-        if item.get("tradeable") is False: continue
+
+        # The scapi listing index stores the official item path in "data",
+        # e.g. "/items/artefact/electrophysical/....json". Category is not
+        # necessarily a top-level field in this compact index.
+        item_path = str(item.get("data") or item.get("path") or "")
+        category_text = " ".join(
+            str(item.get(k) or "")
+            for k in ("category", "sub_category", "subcategory", "type")
+        ).lower()
+        searchable = f"{category_text} {item_path}".lower()
+        if "artifact" not in searchable and "artefact" not in searchable:
+            continue
+        if item.get("tradeable") is False:
+            continue
+
         name = item.get("name") or item.get("title") or item_id
-        if isinstance(name, dict): name = name.get("en") or name.get("EN") or next(iter(name.values()), item_id)
+        if isinstance(name, dict):
+            # Official item names use {type: "translation", lines: {en: ...}}.
+            lines = name.get("lines")
+            if isinstance(lines, dict):
+                name = lines.get("en") or lines.get("ru") or next(iter(lines.values()), item_id)
+            else:
+                name = name.get("en") or name.get("text") or item_id
         result[str(item_id)] = str(name)
+
+    logger.info("Catalog index contains %s total entries; %s artifacts matched", len(raw), len(result))
     if not result:
-        raise RuntimeError("Artifact catalog returned zero entries; refusing to run with an empty catalog.")
-    return dict(sorted(result.items(), key=lambda x:x[1].casefold()))
+        samples = list(raw.items())[:3]
+        logger.error("Catalog sample for diagnosis: %r", samples)
+        raise RuntimeError("Artifact catalog returned zero entries; inspect catalog sample in logs.")
+    return dict(sorted(result.items(), key=lambda x: x[1].casefold()))
 
 def extra(lot):
     x = getattr(lot, "additional", None)
