@@ -60,8 +60,10 @@ def init_db():
 
 async def load_catalog():
     from scapi import DatabaseLookup
-    # scapi.DatabaseLookup.get_all is asynchronous; await it before iterating.
-    raw = await DatabaseLookup().get_all(realm=REALM)
+    # DatabaseLookup must sync its remote realm index before get_all can read it.
+    lookup = DatabaseLookup()
+    await lookup.sync(realm=REALM)
+    raw = await lookup.get_all(realm=REALM)
     result = {}
     for item_id, item in raw.items():
         if not isinstance(item, dict): continue
