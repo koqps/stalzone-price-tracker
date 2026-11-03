@@ -47,7 +47,8 @@ def dbconn():
         raise RuntimeError("SUPABASE_DB_URL is missing. Add the Supabase Transaction Pooler connection string in Render.")
     conn = psycopg.connect(DB_URL, row_factory=dict_row, connect_timeout=15)
     try:
-        yield conn
+        with conn:
+            yield conn
     finally:
         conn.close()
 
