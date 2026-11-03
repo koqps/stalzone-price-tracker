@@ -87,8 +87,9 @@ def quality_of(x):
     return q if q in QUALITIES else None
 
 def level_of(x):
-    # ptn is a pattern field, not enhancement level.
-    for key in ("upgrade_level", "upgradeLevel", "upgrade_lvl"):
+    # STALZONE auction terminology uses ptn for the +0..+15 sharpening/potential.
+    # Some wrappers may expose a normalized upgrade_level alias instead.
+    for key in ("ptn", "upgrade_level", "upgradeLevel", "upgrade_lvl"):
         if key in x:
             try: n = int(x[key])
             except (TypeError, ValueError): return None
