@@ -59,9 +59,13 @@ def init_db():
         c.execute("SELECT 1 FROM public.discord_sent_alerts LIMIT 1")
 
 async def load_catalog():
-    from scapi import DatabaseLookup
-    # DatabaseLookup must sync its remote realm index before get_all can read it.
-    lookup = DatabaseLookup()
+    from scapi import DatabaseLookup, GitHubClient
+    # Authenticate catalog requests to avoid GitHub's unauthenticated shared-IP rate limit.
+    github_token = os.getenv("GITHUB_TOKEN", "").strip()
+    if not github_token:
+        raise RuntimeError("GITHUB_TOKEN is missing. Add a read-only GitHub token in Render environment variables.")
+    github = GitHubClient(token=github_token)
+    lookup = DatabaseLookup(github=github, sync_on_update=False)
     await lookup.sync(realm=REALM)
     raw = await lookup.get_all(realm=REALM)
     result = {}
