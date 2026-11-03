@@ -165,13 +165,21 @@ async def scan_market():
         except Exception:
             log.exception("Auction request failed for %s", item_id)
             continue
+        item_name = item_watches[0]["item_name"]
+        log.info("Fetched %d market lots for %s (%s)", len(lots), item_name, item_id)
+        parsed_summary = {}
         for lot in lots:
             x = extra(lot); q = quality_of(x); level = level_of(x)
-            if q is None or level is None: continue
             amount = max(1, int(getattr(lot,"amount",1) or 1))
             total = float(getattr(lot,"buyout_price",0) or 0)
             if total <= 0: continue
-            price = total / amount; checked += 1
+            price = total / amount
+            parsed_key = (q, level)
+            parsed_summary[parsed_key] = parsed_summary.get(parsed_key, 0) + 1
+            if q is None or level is None:
+                log.info("Unparsed lot for %s: additional=%r amount=%s buyout=%s", item_name, x, amount, total)
+                continue
+            checked += 1
             started = getattr(lot,"start_time",None)
             if hasattr(started,"isoformat"): started = started.isoformat()
             lot_id = f"{item_id}:{started}:{total}:{amount}"
@@ -197,6 +205,9 @@ async def scan_market():
                     sent += 1
                 except Exception:
                     log.exception("Failed to send alert")
+        log.info("Parsed market variants for %s: %r", item_name,
+            {f"{QUALITIES[q] if q in QUALITIES else q} +{level}": count
+             for (q, level), count in parsed_summary.items()})
         await asyncio.sleep(0.8)
     log.info("Scan complete: %d listings checked, %d alerts sent", checked, sent)
     return checked, sent
