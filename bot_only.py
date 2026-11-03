@@ -58,9 +58,10 @@ def init_db():
         c.execute("SELECT 1 FROM public.discord_artifact_watches LIMIT 1")
         c.execute("SELECT 1 FROM public.discord_sent_alerts LIMIT 1")
 
-def load_catalog():
+async def load_catalog():
     from scapi import DatabaseLookup
-    raw = DatabaseLookup().get_all(realm=REALM)
+    # scapi.DatabaseLookup.get_all is asynchronous; await it before iterating.
+    raw = await DatabaseLookup().get_all(realm=REALM)
     result = {}
     for item_id, item in raw.items():
         if not isinstance(item, dict): continue
@@ -187,7 +188,7 @@ async def on_ready():
         if not CLIENT_ID or not CLIENT_SECRET: raise RuntimeError("EXBO OAuth credentials are missing.")
         from scapi import AppClient
         api = AppClient(client_id=CLIENT_ID, client_secret=CLIENT_SECRET)
-        catalog = await asyncio.to_thread(load_catalog)
+        catalog = await load_catalog()
         log.info("Loaded %d tradeable artifacts", len(catalog))
         synced = await bot.tree.sync()
         log.info("Synced %d slash commands", len(synced))
@@ -258,7 +259,7 @@ async def reload_cmd(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True,thinking=True)
     try:
         global catalog
-        catalog = await asyncio.to_thread(load_catalog)
+        catalog = await load_catalog()
         await interaction.followup.send(f"Catalog refreshed: {len(catalog)} artifacts.")
     except Exception as e:
         log.exception("Catalog refresh failed")
