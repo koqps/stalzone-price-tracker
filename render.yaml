@@ -1,8 +1,5 @@
-# render.yaml — Render Blueprint for StalZone Price Tracker
-# This file tells Render exactly how to configure your service.
-# When you create a new service on Render, select "Blueprint" and point it
-# at your repo — it reads this file and sets everything up automatically.
-
+# Discord-first StalZone artifact tracker.
+# The tiny HTTP endpoint is only for Render health checks; there is no website.
 services:
   - type: web
     name: stalzone-tracker
@@ -10,24 +7,22 @@ services:
     region: oregon
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python combined.py
+    startCommand: python bot_only.py
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.9
+        value: "3.11.9"
       - key: REGION
         value: na
-      - key: LIVE_MARKET_DATA
-        value: "true"
-      - key: AUCTION_LOT_LIMIT
+      - key: REALM
+        value: global
+      - key: SCAN_INTERVAL
+        value: "300"
+      - key: LOT_LIMIT
         value: "100"
-      - key: MIN_ALERT_CONFIDENCE
-        value: "65"
       - key: DISCORD_TOKEN
         sync: false
       - key: EXBO_CLIENT_ID
         sync: false
       - key: EXBO_CLIENT_SECRET
-        sync: false
-      - key: CHANNEL_ID
         sync: false
