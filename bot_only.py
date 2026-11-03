@@ -1,8 +1,10 @@
 from __future__ import annotations
-import asyncio, logging, os, sqlite3, time
-from contextlib import closing
-from pathlib import Path
+import asyncio, logging, os
+from contextlib import contextmanager
 from typing import Any
+
+import psycopg
+from psycopg.rows import dict_row
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -25,8 +27,8 @@ REGION = os.getenv("REGION", "na").lower()
 REALM = os.getenv("REALM", "global").lower()
 INTERVAL = max(60, int(os.getenv("SCAN_INTERVAL", "300")))
 LIMIT = min(200, max(1, int(os.getenv("LOT_LIMIT", "100"))))
-DB_PATH = Path(os.getenv("BOT_DB_PATH", "data/tracker.sqlite3"))
-QUALITIES = {0:"Common", 1:"Uncommon", 2:"Special", 3:"Rare", 4:"Exclusive", 5:"Legendary"}
+DB_URL = os.getenv("SUPABASE_DB_URL", "")
+QUALITIES = {0:"Common", 1:"Uncommon", 2:"Special", 3:"Rare", 4:"Exclusive", 5:"Legendary", 6:"Unique"}
 Q_CHOICES = [app_commands.Choice(name=n, value=i) for i,n in QUALITIES.items()]
 L_CHOICES = [app_commands.Choice(name=f"+{i}", value=i) for i in range(16)]
 api: Any = None
@@ -39,26 +41,21 @@ app = FastAPI()
 async def health():
     return {"ok": True, "discord_ready": bot.is_ready(), "artifacts": len(catalog)}
 
+@contextmanager
 def dbconn():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(DB_PATH, timeout=30)
-    c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL")
-    return c
+    if not DB_URL:
+        raise RuntimeError("SUPABASE_DB_URL is missing. Add the Supabase Transaction Pooler connection string in Render.")
+    conn = psycopg.connect(DB_URL, row_factory=dict_row, connect_timeout=15)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 def init_db():
-    with closing(dbconn()) as c:
-        c.executescript("""
-        CREATE TABLE IF NOT EXISTS watches(
-          id INTEGER PRIMARY KEY, guild_id TEXT NOT NULL, user_id TEXT NOT NULL,
-          channel_id TEXT NOT NULL, item_id TEXT NOT NULL, item_name TEXT NOT NULL,
-          quality INTEGER NOT NULL, level INTEGER NOT NULL, max_price REAL NOT NULL,
-          enabled INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL,
-          UNIQUE(guild_id,user_id,item_id,quality,level));
-        CREATE TABLE IF NOT EXISTS sent_alerts(
-          alert_key TEXT PRIMARY KEY, sent_at REAL NOT NULL);
-        """)
-        c.commit()
+    # Tables are provisioned by the Supabase migration; never create local/ephemeral storage.
+    with dbconn() as c:
+        c.execute("SELECT 1 FROM public.discord_artifact_watches LIMIT 1")
+        c.execute("SELECT 1 FROM public.discord_sent_alerts LIMIT 1")
 
 def load_catalog():
     from scapi import DatabaseLookup
@@ -96,22 +93,26 @@ def level_of(x):
             return n if 0 <= n <= 15 else None
     return None
 
-def alert_once(key):
-    with closing(dbconn()) as c:
-        try:
-            c.execute("INSERT INTO sent_alerts VALUES (?,?)", (key,time.time()))
-            c.commit()
-            return True
-        except sqlite3.IntegrityError:
-            return False
+def alert_once(key, watch_id):
+    with dbconn() as c:
+        row = c.execute(
+            "INSERT INTO public.discord_sent_alerts(alert_key,watch_id) VALUES (%s,%s) "
+            "ON CONFLICT(alert_key) DO NOTHING RETURNING alert_key",
+            (key, watch_id),
+        ).fetchone()
+        return row is not None
 
 def was_alerted(key):
-    with closing(dbconn()) as c:
-        return c.execute("SELECT 1 FROM sent_alerts WHERE alert_key=?", (key,)).fetchone() is not None
+    with dbconn() as c:
+        return c.execute(
+            "SELECT 1 FROM public.discord_sent_alerts WHERE alert_key=%s", (key,)
+        ).fetchone() is not None
 
 def watches():
-    with closing(dbconn()) as c:
-        return c.execute("SELECT * FROM watches WHERE enabled=1").fetchall()
+    with dbconn() as c:
+        return c.execute(
+            "SELECT * FROM public.discord_artifact_watches WHERE enabled=true"
+        ).fetchall()
 
 async def fetch_lots(item_id):
     from scapi.enums import Order, SortAuction
@@ -157,7 +158,7 @@ async def scan_market():
                 embed.add_field(name="Region", value=REGION.upper())
                 try:
                     await channel.send(content=f"<@{w['user_id']}>", embed=embed)
-                    alert_once(alert_key)
+                    alert_once(alert_key, w["id"])
                     sent += 1
                 except Exception:
                     log.exception("Failed to send alert")
@@ -203,21 +204,23 @@ async def watch_cmd(interaction: discord.Interaction, artifact: str,
     name = catalog.get(artifact)
     if not name:
         await interaction.response.send_message("Artifact not found. Try /reload_catalog.", ephemeral=True); return
-    with closing(dbconn()) as c:
-        c.execute("""INSERT INTO watches(guild_id,user_id,channel_id,item_id,item_name,quality,level,max_price,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(guild_id,user_id,item_id,quality,level)
-        DO UPDATE SET channel_id=excluded.channel_id,max_price=excluded.max_price,enabled=1""",
+    with dbconn() as c:
+        c.execute("""INSERT INTO public.discord_artifact_watches
+        (guild_id,user_id,channel_id,item_id,item_name,quality,level,max_price)
+        VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT(guild_id,user_id,item_id,quality,level)
+        DO UPDATE SET channel_id=excluded.channel_id,max_price=excluded.max_price,
+                      enabled=true,updated_at=now()""",
         (str(interaction.guild_id),str(interaction.user.id),str(interaction.channel_id),
-         artifact,name,quality.value,level.value,max_price,time.time()))
-        c.commit()
+         artifact,name,quality.value,level.value,max_price))
     await interaction.response.send_message(
         f"Watching {name} — {quality.name} +{level.value}; alert at {max_price:,} RUB or less per item.",
         ephemeral=True)
 
 @bot.tree.command(name="watches", description="List your active artifact alerts")
 async def watches_cmd(interaction: discord.Interaction):
-    with closing(dbconn()) as c:
-        rows = c.execute("SELECT * FROM watches WHERE guild_id=? AND user_id=? AND enabled=1",
+    with dbconn() as c:
+        rows = c.execute("SELECT * FROM public.discord_artifact_watches WHERE guild_id=%s AND user_id=%s AND enabled=true",
             (str(interaction.guild_id),str(interaction.user.id))).fetchall()
     if not rows:
         await interaction.response.send_message("No active watches. Use /watch.",ephemeral=True); return
@@ -230,10 +233,9 @@ async def watches_cmd(interaction: discord.Interaction):
 @app_commands.autocomplete(artifact=autocomplete_artifact)
 async def unwatch_cmd(interaction: discord.Interaction, artifact: str,
     quality: app_commands.Choice[int], level: app_commands.Choice[int]):
-    with closing(dbconn()) as c:
-        cur = c.execute("DELETE FROM watches WHERE guild_id=? AND user_id=? AND item_id=? AND quality=? AND level=?",
+    with dbconn() as c:
+        cur = c.execute("DELETE FROM public.discord_artifact_watches WHERE guild_id=%s AND user_id=%s AND item_id=%s AND quality=%s AND level=%s",
             (str(interaction.guild_id),str(interaction.user.id),artifact,quality.value,level.value))
-        c.commit()
     await interaction.response.send_message("Watch removed." if cur.rowcount else "No matching watch.",ephemeral=True)
 
 @bot.tree.command(name="scan", description="Run a market scan immediately")
@@ -244,8 +246,8 @@ async def scan_cmd(interaction: discord.Interaction):
 
 @bot.tree.command(name="status", description="Show tracker status")
 async def status_cmd(interaction: discord.Interaction):
-    with closing(dbconn()) as c:
-        count = c.execute("SELECT COUNT(*) FROM watches WHERE enabled=1").fetchone()[0]
+    with dbconn() as c:
+        count = c.execute("SELECT COUNT(*) AS count FROM public.discord_artifact_watches WHERE enabled=true").fetchone()["count"]
     await interaction.response.send_message(
         f"Bot: {'online' if bot.is_ready() else 'connecting'} | Region: {REGION.upper()} | "
         f"Artifacts: {len(catalog)} | Watches: {count} | Scan: {INTERVAL}s", ephemeral=True)
