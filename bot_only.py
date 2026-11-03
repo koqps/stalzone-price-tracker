@@ -146,8 +146,13 @@ def watches():
 
 async def fetch_lots(item_id):
     from scapi.enums import Order, SortAuction
-    result = await asyncio.to_thread(api.auction(item_id).lots, limit=LIMIT,
-        sort=SortAuction.BUYOUT_PRICE, order=Order.ASC, additional=True, region=REGION)
+    result = await api.auction(item_id).lots(
+        limit=LIMIT,
+        sort=SortAuction.BUYOUT_PRICE,
+        order=Order.ASC,
+        additional=True,
+        region=REGION,
+    )
     return list(result)
 
 async def scan_market():
