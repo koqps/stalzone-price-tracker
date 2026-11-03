@@ -105,6 +105,10 @@ def alert_once(key):
         except sqlite3.IntegrityError:
             return False
 
+def was_alerted(key):
+    with closing(dbconn()) as c:
+        return c.execute("SELECT 1 FROM sent_alerts WHERE alert_key=?", (key,)).fetchone() is not None
+
 def watches():
     with closing(dbconn()) as c:
         return c.execute("SELECT * FROM watches WHERE enabled=1").fetchall()
@@ -137,6 +141,8 @@ async def scan_market():
             lot_id = f"{item_id}:{started}:{total}:{amount}"
             for w in item_watches:
                 if q != w["quality"] or level != w["level"] or price > w["max_price"]: continue
+                alert_key = f"{lot_id}:{w['id']}"
+                if was_alerted(alert_key): continue
                 channel = bot.get_channel(int(w["channel_id"]))
                 if channel is None:
                     try: channel = await bot.fetch_channel(int(w["channel_id"]))
@@ -151,8 +157,8 @@ async def scan_market():
                 embed.add_field(name="Region", value=REGION.upper())
                 try:
                     await channel.send(content=f"<@{w['user_id']}>", embed=embed)
-                    if alert_once(f"{lot_id}:{w['id']}"):
-                        sent += 1
+                    alert_once(alert_key)
+                    sent += 1
                 except Exception:
                     log.exception("Failed to send alert")
         await asyncio.sleep(0.8)
