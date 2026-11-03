@@ -97,10 +97,10 @@ async def load_catalog():
                 name = name.get("en") or name.get("text") or item_id
         result[str(item_id)] = str(name)
 
-    logger.info("Catalog index contains %s total entries; %s artifacts matched", len(raw), len(result))
+    log.info("Catalog index contains %s total entries; %s artifacts matched", len(raw), len(result))
     if not result:
         samples = list(raw.items())[:3]
-        logger.error("Catalog sample for diagnosis: %r", samples)
+        log.error("Catalog sample for diagnosis: %r", samples)
         raise RuntimeError("Artifact catalog returned zero entries; inspect catalog sample in logs.")
     return dict(sorted(result.items(), key=lambda x: x[1].casefold()))
 
