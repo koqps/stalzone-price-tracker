@@ -11,3 +11,6 @@ aiohttp>=3.9.0
 stalcraft-api>=2.1.0
 
 # Web dashboard (frontend uses CDN for Chart.js, no Python deps needed)
+
+# Supabase PostgreSQL persistence (Render filesystem is ephemeral)
+psycopg[binary]>=3.2.0
