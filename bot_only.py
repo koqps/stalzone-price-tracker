@@ -137,7 +137,6 @@ async def scan_market():
             lot_id = f"{item_id}:{started}:{total}:{amount}"
             for w in item_watches:
                 if q != w["quality"] or level != w["level"] or price > w["max_price"]: continue
-                if not alert_once(f"{lot_id}:{w['id']}"): continue
                 channel = bot.get_channel(int(w["channel_id"]))
                 if channel is None:
                     try: channel = await bot.fetch_channel(int(w["channel_id"]))
@@ -151,8 +150,11 @@ async def scan_market():
                 embed.add_field(name="Your limit", value=f"{w['max_price']:,.0f} RUB")
                 embed.add_field(name="Region", value=REGION.upper())
                 try:
-                    await channel.send(content=f"<@{w['user_id']}>", embed=embed); sent += 1
-                except Exception: log.exception("Failed to send alert")
+                    await channel.send(content=f"<@{w['user_id']}>", embed=embed)
+                    if alert_once(f"{lot_id}:{w['id']}"):
+                        sent += 1
+                except Exception:
+                    log.exception("Failed to send alert")
         await asyncio.sleep(0.8)
     log.info("Scan complete: %d listings checked, %d alerts sent", checked, sent)
     return checked, sent
@@ -181,7 +183,7 @@ async def on_ready():
         log.info("Loaded %d tradeable artifacts", len(catalog))
         synced = await bot.tree.sync()
         log.info("Synced %d slash commands", len(synced))
-        bot.loop.create_task(scanner())
+        asyncio.create_task(scanner())
 
 @bot.tree.command(name="watch", description="Watch an exact artifact rarity and enhancement")
 @app_commands.describe(artifact="Artifact", quality="Rarity", level="Enhancement level", max_price="Maximum RUB per artifact")
