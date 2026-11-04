@@ -33,6 +33,9 @@ Q_CHOICES = [app_commands.Choice(name=n, value=i) for i,n in QUALITIES.items()]
 L_CHOICES = [app_commands.Choice(name=f"+{i}", value=i) for i in range(16)]
 api: Any = None
 catalog: dict[str,str] = {}
+catalog_all: dict[str,str] = {}
+market_cursor = 0
+MARKET_BATCH = max(5, min(100, int(os.getenv("MARKET_BATCH", "20"))))
 bot = commands.Bot(command_prefix="!", intents=discord.Intents.default())
 app = FastAPI()
 
@@ -68,7 +71,8 @@ async def load_catalog():
     lookup = DatabaseLookup(github=github, sync_on_update=False)
     await lookup.sync(realm=REALM)
     raw = await lookup.get_all(realm=REALM)
-    result = {}
+    all_items = {}
+    artifacts = {}
     for item_id, item in raw.items():
         if not isinstance(item, dict):
             continue
@@ -82,8 +86,6 @@ async def load_catalog():
             for k in ("category", "sub_category", "subcategory", "type")
         ).lower()
         searchable = f"{category_text} {item_path}".lower()
-        if "artifact" not in searchable and "artefact" not in searchable:
-            continue
         if item.get("tradeable") is False:
             continue
 
@@ -95,14 +97,15 @@ async def load_catalog():
                 name = lines.get("en") or lines.get("ru") or next(iter(lines.values()), item_id)
             else:
                 name = name.get("en") or name.get("text") or item_id
-        result[str(item_id)] = str(name)
+        all_items[str(item_id)] = str(name)
+        if "artifact" in searchable or "artefact" in searchable:
+            artifacts[str(item_id)] = str(name)
 
-    log.info("Catalog index contains %s total entries; %s artifacts matched", len(raw), len(result))
-    if not result:
-        samples = list(raw.items())[:3]
-        log.error("Catalog sample for diagnosis: %r", samples)
-        raise RuntimeError("Artifact catalog returned zero entries; inspect catalog sample in logs.")
-    return dict(sorted(result.items(), key=lambda x: x[1].casefold()))
+    log.info("Catalog index contains %s entries; %s tradeable and %s artifacts", len(raw), len(all_items), len(artifacts))
+    if not all_items:
+        raise RuntimeError("Tradeable catalog returned zero entries.")
+    return (dict(sorted(artifacts.items(), key=lambda x: x[1].casefold())),
+            dict(sorted(all_items.items(), key=lambda x: x[1].casefold()))
 
 def extra(lot):
     x = getattr(lot, "additional", None)
@@ -212,11 +215,52 @@ async def scan_market():
     log.info("Scan complete: %d listings checked, %d alerts sent", checked, sent)
     return checked, sent
 
+async def scan_catalog_batch():
+    """Rotate through the full tradeable catalog without hammering the auction API."""
+    global market_cursor
+    if api is None or not catalog_all:
+        return 0
+    ids = list(catalog_all)
+    start = market_cursor % len(ids)
+    batch = [ids[(start + i) % len(ids)] for i in range(min(MARKET_BATCH, len(ids)))]
+    market_cursor = (start + len(batch)) % len(ids)
+    observed = 0
+    for item_id in batch:
+        try:
+            lots = await fetch_lots(item_id)
+            now = __import__("time").time()
+            for lot in lots:
+                amount = max(1, int(getattr(lot, "amount", 1) or 1))
+                total = float(getattr(lot, "buyout_price", 0) or 0)
+                if total <= 0:
+                    continue
+                x = extra(lot)
+                q, level = quality_of(x), level_of(x)
+                started = getattr(lot, "start_time", None)
+                if hasattr(started, "isoformat"):
+                    started = started.isoformat()
+                lot_key = str(getattr(lot, "id", None) or f"{started}:{total}:{amount}:{q}:{level}")
+                with dbconn() as c:
+                    c.execute("""INSERT INTO public.auction_snapshot
+                    (item_id,item_name,region,qlt,upgrade_level,amount,buyout_price,unit_price,lot_key,observed_at)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT DO NOTHING""",
+                    (item_id,catalog_all[item_id],REGION,q,level,amount,total,total/amount,lot_key,now))
+                observed += 1
+        except Exception:
+            log.exception("Full-catalog market scan failed for %s", item_id)
+        await asyncio.sleep(0.8)
+    log.info("Catalog research batch: %d/%d items visited; %d listings stored",len(batch),len(ids),observed)
+    return observed
+
 async def scanner():
     await bot.wait_until_ready()
     while not bot.is_closed():
-        try: await scan_market()
-        except Exception: log.exception("Scanner error")
+        try:
+            await scan_market()
+            await scan_catalog_batch()
+        except Exception:
+            log.exception("Scanner error")
         await asyncio.sleep(INTERVAL)
 
 async def autocomplete_artifact(interaction, current):
@@ -226,14 +270,14 @@ async def autocomplete_artifact(interaction, current):
 
 @bot.event
 async def on_ready():
-    global api, catalog
+    global api, catalog, catalog_all
     log.info("Connected to Discord as %s", bot.user)
     if api is None:
         if not CLIENT_ID or not CLIENT_SECRET: raise RuntimeError("EXBO OAuth credentials are missing.")
         from scapi import AppClient
         api = AppClient(client_id=CLIENT_ID, client_secret=CLIENT_SECRET)
-        catalog = await load_catalog()
-        log.info("Loaded %d tradeable artifacts", len(catalog))
+        catalog, catalog_all = await load_catalog()
+        log.info("Loaded %d artifacts and %d tradeable items", len(catalog), len(catalog_all))
         synced = await bot.tree.sync()
         log.info("Synced %d slash commands", len(synced))
         asyncio.create_task(scanner())
@@ -302,9 +346,9 @@ async def status_cmd(interaction: discord.Interaction):
 async def reload_cmd(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True,thinking=True)
     try:
-        global catalog
-        catalog = await load_catalog()
-        await interaction.followup.send(f"Catalog refreshed: {len(catalog)} artifacts.")
+        global catalog, catalog_all
+        catalog, catalog_all = await load_catalog()
+        await interaction.followup.send(f"Catalog refreshed: {len(catalog)} artifacts; {len(catalog_all)} tradeable items.")
     except Exception as e:
         log.exception("Catalog refresh failed")
         await interaction.followup.send(f"Catalog refresh failed: {type(e).__name__}: {e}")
