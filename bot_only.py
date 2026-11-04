@@ -334,6 +334,63 @@ async def scan_cmd(interaction: discord.Interaction):
     checked,sent = await scan_market()
     await interaction.followup.send(f"Scan complete: {checked} listings checked; {sent} alerts sent.",ephemeral=True)
 
+
+@bot.tree.command(name="deals", description="Find potentially underpriced items from recent market snapshots")
+async def deals_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    with dbconn() as c:
+        rows = c.execute("""
+        WITH recent AS (
+          SELECT item_id,item_name,region,qlt,upgrade_level,
+                 MIN(unit_price) FILTER (WHERE observed_at >= extract(epoch from now()-interval '15 minutes')) AS current_low,
+                 percentile_cont(0.5) WITHIN GROUP (ORDER BY unit_price) AS observed_median,
+                 COUNT(*) AS observations,
+                 MAX(observed_at) AS last_seen
+          FROM public.auction_snapshot
+          WHERE region=%s AND observed_at >= extract(epoch from now()-interval '24 hours')
+            AND unit_price > 0
+          GROUP BY item_id,item_name,region,qlt,upgrade_level
+        )
+        SELECT *, (observed_median-current_low) AS spread,
+          CASE WHEN observed_median > 0 THEN 100*(observed_median-current_low)/observed_median ELSE 0 END AS discount_pct
+        FROM recent WHERE current_low IS NOT NULL AND observations >= 3
+          AND current_low < observed_median*0.85
+        ORDER BY discount_pct DESC LIMIT 12
+        """, (REGION,)).fetchall()
+    if not rows:
+        await interaction.followup.send("No convincing deals yet. The bot needs more market snapshots first; this improves as it collects data.", ephemeral=True)
+        return
+    lines = ["**Potential deals — based on observed listings, not confirmed completed sales**"]
+    for r in rows:
+        variant = f" — {QUALITIES.get(r['qlt'], 'Unknown')} +{r['upgrade_level']}" if r['qlt'] is not None and r['upgrade_level'] is not None else ""
+        lines.append(f"• **{r['item_name']}{variant}**: {r['current_low']:,.0f} ₽ now vs {r['observed_median']:,.0f} ₽ observed median (−{r['discount_pct']:.1f}%)")
+    await interaction.followup.send("\\n".join(lines), ephemeral=True)
+
+@bot.tree.command(name="market", description="Show the latest tracked market listings for an item")
+@app_commands.describe(item="Item name or catalog ID")
+async def market_cmd(interaction: discord.Interaction, item: str):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    needle = f"%{item.strip()}%"
+    with dbconn() as c:
+        rows = c.execute("""
+        SELECT item_name,qlt,upgrade_level,MIN(unit_price) AS low,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY unit_price) AS median,
+               SUM(amount) AS units, MAX(observed_at) AS seen
+        FROM public.auction_snapshot
+        WHERE region=%s AND observed_at >= extract(epoch from now()-interval '60 minutes')
+          AND (item_name ILIKE %s OR item_id ILIKE %s)
+        GROUP BY item_name,qlt,upgrade_level
+        ORDER BY low ASC LIMIT 12
+        """, (REGION,needle,needle)).fetchall()
+    if not rows:
+        await interaction.followup.send("No recent snapshots for that item yet. It may not have been scanned; try again after the catalog rotation reaches it.",ephemeral=True)
+        return
+    lines=[f"**{rows[0]['item_name']} — recent {REGION.upper()} market observations**"]
+    for r in rows:
+        variant=f"{QUALITIES.get(r['qlt'],'Unknown')} +{r['upgrade_level']}" if r['qlt'] is not None and r['upgrade_level'] is not None else "Unspecified variant"
+        lines.append(f"• {variant}: low {r['low']:,.0f} ₽ | median {r['median']:,.0f} ₽ | observed units {r['units']}")
+    await interaction.followup.send("\\n".join(lines),ephemeral=True)
+
 @bot.tree.command(name="status", description="Show tracker status")
 async def status_cmd(interaction: discord.Interaction):
     with dbconn() as c:
